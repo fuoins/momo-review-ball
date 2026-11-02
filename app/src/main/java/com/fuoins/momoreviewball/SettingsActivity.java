@@ -189,6 +189,12 @@ public class SettingsActivity extends Activity {
                     save();
                 }));
 
+        card.addView(switchRow("诊断模式", "加载成功时提示，长按 3 秒输出页面信息到日志", config.diagnose,
+                (buttonView, checked) -> {
+                    config.diagnose = checked;
+                    save();
+                }));
+
         card.addView(divider(marginTop(dp(8))));
 
         xValue = text(Math.round(config.xRatio * 100) + "%", 13, NAVY, true);

@@ -53,8 +53,9 @@ public final class Config {
     public boolean locked = false;
     public boolean longPressLock = true;
     public boolean haptic = true;
+    public boolean diagnose = true;
     public float xRatio = 0.92f;
-    public float yRatio = 0.62f;
+    public float yRatio = 0.74f;
     public int peekMs = 1600;
     public String[] before = DEFAULT_BEFORE.clone();
     public String[] after = DEFAULT_AFTER.clone();
@@ -80,6 +81,7 @@ public final class Config {
             o.put("locked", locked);
             o.put("longPressLock", longPressLock);
             o.put("haptic", haptic);
+            o.put("diagnose", diagnose);
             o.put("xRatio", (double) xRatio);
             o.put("yRatio", (double) yRatio);
             o.put("peekMs", peekMs);
@@ -101,6 +103,7 @@ public final class Config {
             c.locked = o.optBoolean("locked", c.locked);
             c.longPressLock = o.optBoolean("longPressLock", c.longPressLock);
             c.haptic = o.optBoolean("haptic", c.haptic);
+            c.diagnose = o.optBoolean("diagnose", c.diagnose);
             c.xRatio = clamp((float) o.optDouble("xRatio", c.xRatio), 0f, 1f);
             c.yRatio = clamp((float) o.optDouble("yRatio", c.yRatio), 0f, 1f);
             c.peekMs = clamp(o.optInt("peekMs", c.peekMs), 600, 5000);
@@ -144,8 +147,14 @@ public final class Config {
         private static volatile Config cached;
         private static volatile long cachedAt;
         private static volatile long cachedTtl = 700L;
+        private static volatile String lastSource = "unknown";
 
         private Client() {
+        }
+
+        /** 最近一次配置读取的来源，用于诊断模块与设置页之间的跨进程链路。 */
+        public static String describeSource() {
+            return lastSource;
         }
 
         public static Config get(Context context) {
@@ -156,15 +165,26 @@ public final class Config {
             }
             c = null;
             long ttl = 5000L;
+            String source;
             try {
                 Bundle bundle = context.getContentResolver().call(URI, "get", null, null);
                 if (bundle != null && bundle.getString("json") != null) {
                     c = fromJson(bundle.getString("json"));
                     ttl = 2000L;
+                    source = "provider";
+                } else {
+                    source = "provider-empty";
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                source = "provider-error(" + t.getClass().getSimpleName() + ")";
             }
-            if (c == null) c = defaults();
+            if (c == null) {
+                c = defaults();
+                if ("provider".equals(source) || "provider-empty".equals(source)) {
+                    source = source + "+default";
+                }
+            }
+            lastSource = source;
             cached = c;
             cachedAt = now;
             cachedTtl = ttl;

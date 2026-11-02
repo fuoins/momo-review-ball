@@ -32,7 +32,7 @@
             android:value="为墨墨背单词复习页提供可自定义手势的悬浮球" />
         <meta-data
             android:name="xposedminversion"
-            android:value="93" />
+            android:value="82" />
         <meta-data
             android:name="xposedscope"
             android:resource="@array/xposed_scope" />

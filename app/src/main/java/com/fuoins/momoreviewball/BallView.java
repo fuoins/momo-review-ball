@@ -13,15 +13,17 @@ import android.view.View;
 import android.view.ViewOutlineProvider;
 import android.view.animation.DecelerateInterpolator;
 
-/** 悬浮球本体：深蓝圆球 + 四向箭头，锁定后右下角出现小锁。 */
+/** 悬浮球本体：深蓝圆角方块 + 橙色描边 + 四向箭头，锁定后右下角出现小锁。 */
 public class BallView extends View {
 
     private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint borderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glyphPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint accentPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint lockPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path chevron = new Path();
+    private final RectF body = new RectF();
 
     private int alphaPercent = 88;
     private boolean locked;
@@ -40,15 +42,21 @@ public class BallView extends View {
         setOutlineProvider(new ViewOutlineProvider() {
             @Override
             public void getOutline(View view, Outline outline) {
-                outline.setOval(0, 0, view.getWidth(), view.getHeight());
+                float inset = dp(5f);
+                outline.setRoundRect((int) inset, (int) inset,
+                        (int) (view.getWidth() - inset), (int) (view.getHeight() - inset),
+                        Math.min(view.getWidth(), view.getHeight()) * 0.30f);
             }
         });
-        glyphPaint.setColor(0xF2FFFFFF);
+        glyphPaint.setColor(0xFFFFFFFF);
         glyphPaint.setStyle(Paint.Style.FILL);
         ringPaint.setStyle(Paint.Style.STROKE);
         ringPaint.setStrokeWidth(dp(1.1f));
         ringPaint.setColor(0x44FFFFFF);
-        accentPaint.setColor(0xFFF2A33C);
+        borderPaint.setStyle(Paint.Style.STROKE);
+        borderPaint.setStrokeWidth(dp(1.8f));
+        borderPaint.setColor(0xFFF2A33C);
+        accentPaint.setColor(0xFFFFFFFF);
         accentPaint.setStyle(Paint.Style.FILL);
     }
 

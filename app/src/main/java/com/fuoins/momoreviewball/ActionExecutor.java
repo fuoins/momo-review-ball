@@ -328,7 +328,7 @@ public final class ActionExecutor {
     }
 
     /** 失败时把当前可见文案写进日志，方便适配新版界面。 */
-    private static String dumpTexts(Activity activity) {
+    public static String dumpTexts(Activity activity) {
         ArrayList<TextView> views = new ArrayList<>();
         collectTextViews(activity.getWindow().getDecorView(), views);
         StringBuilder builder = new StringBuilder();
