@@ -137,53 +137,71 @@ public final class ActionExecutor {
      * 完全不复制它的业务逻辑，也不自绘任何提示层。
      */
     private static boolean peek(Activity activity) {
-        // ① 个别版本/模式下工具条上会直接出现「瞄一眼」控件，有就点
+        // ① 页面上真有官方「瞄一眼」控件就点它
         if (clickPeekControl(activity)) return true;
 
-        // ② 主路径：把「左滑」交给原生悬浮球
-        if (!isAnswerShown(activity)) {
-            // 指纹要在按下之前取：官方的「瞄一眼」是按住期间把例句顶出来、
-            // 松手就恢复，所以判断必须落在这段「按住窗口」里，而不是抬手之后。
-            final String before = visibleTextSignature(activity);
-            if (FloatingButtonHook.replayNative(3)) {
-                XposedLog.i("瞄一眼：已按住原生球左滑，1.5 秒后自动松手");
-                final View decor = activity.getWindow().getDecorView();
+        // 答案已经出来了，瞄一眼没有意义
+        if (isAnswerShown(activity)) return sendPeekShortcut(activity);
 
-                // 回放分帧走：约 160ms 滑到位，然后按住 1.5 秒。
-                // 在按住窗口里查两次，松手后再查一次，都不变才换下一条路。
-                decor.postDelayed(() -> {
-                    if (peekPreviewShown(activity, before)) {
-                        XposedLog.i("瞄一眼：按住期间出现例句，回放生效");
-                        return;
-                    }
-                    decor.postDelayed(() -> {
-                        if (peekPreviewShown(activity, before)) {
-                            XposedLog.i("瞄一眼：按住期间出现例句，回放生效");
-                            return;
-                        }
-                        decor.postDelayed(() -> {
-                            if (peekPreviewShown(activity, before)) {
-                                XposedLog.i("瞄一眼：松手后界面有变化，回放生效");
-                                return;
-                            }
-                            // 不再盲调官方回调：日志已经证明 a(2) 走的是「显示答案」，
-                            // 盲目试参数会把答案直接翻出来，反而干扰复习。
-                            XposedLog.w("瞄一眼：左滑按住预览全程无变化，等待手动校准");
-                            peekFallback(activity, before);
-                        }, 1000L);
-                    }, 700L);
-                }, 700L);
-                return true;
+        final String before = visibleTextSignature(activity);
+        final View decor = activity.getWindow().getDecorView();
+
+        // ② 主路径：官方手势回调。
+        //    手动左滑一次球的日志是「连续 a(-1) + 收手时 a(20)」——-1 是拖动中，
+        //    20 才是「左滑」这个手势的码。直接把它交给墨墨自己的分发，
+        //    不模拟触摸、不经过任何 View，效果和手指左滑完全一致。
+        if (FloatingButtonHook.callFloatBtnListener(GESTURE_LEFT_CODE)) {
+            XposedLog.i("瞄一眼：已把「左滑」交给官方手势回调 a(" + GESTURE_LEFT_CODE + ')');
+            decor.postDelayed(() -> {
+                if (peekPreviewShown(activity, before)) {
+                    XposedLog.i("瞄一眼：官方手势回调 a(" + GESTURE_LEFT_CODE + ") 已生效");
+                    return;
+                }
+                XposedLog.w("瞄一眼：官方手势回调没有让界面变化，改走触摸回放");
+                replayPeek(activity, before);
+            }, 500L);
+            return true;
+        }
+        replayPeek(activity, before);
+        return true;
+    }
+
+    /**
+     * 手动左滑时官方回调收到的方向码。
+     *
+     * <p>3.1.6 日志里，手指按住球拖动的整个过程每 8ms 回调一次 {@code a(-1)}，
+     * 收手那一刻回调一次 {@code a(20)}，随后又回到 {@code a(-1)}。
+     * 所以 20 就是「左滑」这个手势的码，-1 表示「还在拖动、方向未定」。
+     */
+    private static final int GESTURE_LEFT_CODE = 20;
+
+    /**
+     * 备用路径：把「按住左滑」分帧回放给原生球。
+     *
+     * <p>只在官方回调不可用时才走这里。合成触摸终究不是真手指，
+     * 之前实测会被父容器当成拖动，所以优先级排在官方回调之后。
+     */
+    private static void replayPeek(Activity activity, String before) {
+        if (!FloatingButtonHook.replayNative(3)) {
+            peekFallback(activity, before);
+            return;
+        }
+        XposedLog.i("瞄一眼：已按住原生球左滑，约 1 秒后自动松手");
+        final View decor = activity.getWindow().getDecorView();
+        decor.postDelayed(() -> {
+            if (peekPreviewShown(activity, before)) {
+                XposedLog.i("瞄一眼：按住期间出现例句，回放生效");
+                return;
             }
-        }
-
-        // ③ 兜底：官方快捷键 Ctrl+O
-        boolean ok = sendPeekShortcut(activity);
-        if (!ok) {
-            XposedLog.w("瞄一眼：控件 / 左滑回放 / Ctrl+O 均不可用；可见文案="
-                    + dumpTexts(activity));
-        }
-        return ok;
+            decor.postDelayed(() -> {
+                if (peekPreviewShown(activity, before)) {
+                    XposedLog.i("瞄一眼：松手后界面有变化，回放生效");
+                    return;
+                }
+                XposedLog.w("瞄一眼：触摸回放也没让界面变化");
+                peekFallback(activity, before);
+            }, 1200L);
+        }, 600L);
     }
 
     /**
@@ -194,6 +212,7 @@ public final class ActionExecutor {
      */
     private static boolean peekPreviewShown(Activity activity, String before) {
         if (!peekChanged(activity, before)) return false;
+        XposedLog.i("瞄一眼：界面变化后的可见文案=" + dumpTexts(activity));
         if (isAnswerShown(activity)) {
             XposedLog.w("瞄一眼：注入被页面当成点击、答案被顶出来了，换路径");
             return false;
