@@ -143,24 +143,31 @@ public final class ActionExecutor {
         // ② 主路径：把「左滑」交给原生悬浮球
         if (!isAnswerShown(activity) && FloatingButtonHook.replayNative(3)) {
             XposedLog.i("瞄一眼：已把「左滑」交给原生悬浮球");
-            // 回放是同步投递、异步生效。350ms 后界面文案一点没变，说明原生没接住
-            // （版本差异 / 手势被改过），再补一次 Ctrl+O，避免「回放了但毫无反应」。
             final String before = visibleTextSignature(activity);
-            activity.getWindow().getDecorView().postDelayed(() -> {
-                try {
-                    if (!before.equals(visibleTextSignature(activity))) {
-                        XposedLog.i("瞄一眼：左滑回放已生效");
+            final View decor = activity.getWindow().getDecorView();
+
+            // 回放是同步投递、异步生效。300ms 后界面没动静就换下一条路：
+            // 直调墨墨注册给球的官方手势回调（日志实测是 a(int)），
+            // 再不行才补 Ctrl+O。
+            decor.postDelayed(() -> {
+                if (peekChanged(activity, before)) {
+                    XposedLog.i("瞄一眼：左滑回放已生效");
+                    return;
+                }
+                XposedLog.w("瞄一眼：左滑回放后界面无变化，改为直调官方手势回调");
+                if (!FloatingButtonHook.callFloatBtnListener(2)) {
+                    peekFallback(activity, before);
+                    return;
+                }
+                decor.postDelayed(() -> {
+                    if (peekChanged(activity, before)) {
+                        XposedLog.i("瞄一眼：官方手势回调 a(2) 已生效");
                         return;
                     }
-                    XposedLog.w("瞄一眼：左滑回放后界面无变化，改发 Ctrl+O");
-                    if (!sendPeekShortcut(activity)) {
-                        XposedLog.w("瞄一眼：左滑与 Ctrl+O 都没有反应，可见文案="
-                                + dumpTexts(activity));
-                        toast(activity, "「瞄一眼」没有响应，可在设置页导出日志反馈");
-                    }
-                } catch (Throwable ignored) {
-                }
-            }, 350L);
+                    XposedLog.w("瞄一眼：官方手势回调 a(2) 也没有反应");
+                    peekFallback(activity, before);
+                }, 400L);
+            }, 300L);
             return true;
         }
 
@@ -171,6 +178,21 @@ public final class ActionExecutor {
                     + dumpTexts(activity));
         }
         return ok;
+    }
+
+    private static boolean peekChanged(Activity activity, String before) {
+        try {
+            return !before.equals(visibleTextSignature(activity));
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static void peekFallback(Activity activity, String before) {
+        if (sendPeekShortcut(activity)) return;
+        XposedLog.w("瞄一眼：回放 / 官方回调 / Ctrl+O 都没有反应，可见文案="
+                + dumpTexts(activity));
+        toast(activity, "「瞄一眼」没有响应，可在设置页导出日志反馈");
     }
 
     /** 当前可见文案的指纹，用来判断回放后界面到底有没有变化。 */

@@ -234,6 +234,7 @@ public final class FloatingButtonHook {
                     if (listener == sFloatBtnListener) return;
                     sFloatBtnListener = listener;
                     dumpListener(listener);
+                    hookGestureCallback(listener);
                 }
             });
             XposedLog.i("已监听球的 listener 注册");
@@ -257,7 +258,76 @@ public final class FloatingButtonHook {
             }
         } catch (Throwable ignored) {
         }
+        sb.append("；字段：");
+        try {
+            for (Field field : clazz.getDeclaredFields()) {
+                field.setAccessible(true);
+                sb.append(field.getName()).append('=');
+                try {
+                    sb.append(field.get(listener));
+                } catch (Throwable t) {
+                    sb.append('?');
+                }
+                sb.append(' ');
+            }
+        } catch (Throwable ignored) {
+        }
         XposedLog.i(sb.toString());
+    }
+
+    /** 官方手势回调本身也监听一下：方向常量到底传的几，一眼就能看到。 */
+    private static final Set<Class<?>> LISTENER_HOOKED = new HashSet<>();
+
+    private static void hookGestureCallback(Object listener) {
+        Class<?> clazz = listener.getClass();
+        synchronized (LISTENER_HOOKED) {
+            if (!LISTENER_HOOKED.add(clazz)) return;
+        }
+        try {
+            for (Method method : clazz.getDeclaredMethods()) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1 || params[0] != int.class) continue;
+                XposedBridge.hookMethod(method, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        XposedLog.i("官方手势回调被调用："
+                                + param.method.getName() + "(" + param.args[0] + ")");
+                    }
+                });
+                XposedLog.i("已监听官方手势回调 " + method.getName() + "(int)");
+            }
+        } catch (Throwable t) {
+            XposedLog.w("监听官方手势回调失败", t);
+        }
+    }
+
+    /**
+     * 直调墨墨注册给球的手势回调。
+     *
+     * <p>日志实测这个回调是 {@code z49.a(int)}：一个 int 就是手势方向。
+     * 资源里「发音，瞄一眼、返回上一个单词」正好三个动作，按 上/左/右 对应 1/2/3，
+     * 所以左滑（瞄一眼）先按 2 试。
+     */
+    static boolean callFloatBtnListener(int code) {
+        Object listener = sFloatBtnListener;
+        if (listener == null) {
+            XposedLog.w("官方手势回调还没注册，无法直调");
+            return false;
+        }
+        try {
+            for (Method method : listener.getClass().getDeclaredMethods()) {
+                Class<?>[] params = method.getParameterTypes();
+                if (params.length != 1 || params[0] != int.class) continue;
+                method.setAccessible(true);
+                method.invoke(listener, code);
+                XposedLog.i("已直调官方手势回调 " + method.getName() + "(" + code + ")");
+                return true;
+            }
+            XposedLog.w("官方手势回调里没有 (int) 方法");
+        } catch (Throwable t) {
+            XposedLog.w("直调官方手势回调失败", t);
+        }
+        return false;
     }
 
     static Object floatBtnListener() {
