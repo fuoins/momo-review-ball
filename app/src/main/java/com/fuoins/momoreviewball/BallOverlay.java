@@ -13,6 +13,7 @@ import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
+import android.view.ViewGroup;
 
 
 /**
@@ -111,14 +112,23 @@ final class BallOverlay extends Drawable {
         if (!config.enabled) return;
 
         Context context = host.getContext();
-        float cx = b.exactCenterX();
-        float cy = b.exactCenterY();
-        float side = Math.min(b.width(), b.height());
-        float radius = side / 2f;
 
-        // 沿控件真实轮廓内缩一圈画色带；球体不一定是正圆，用椭圆更贴合
+        // 墨墨的球控件本身不是正方形（5.6 上是 493×582），整个矩形当球画会变成椭圆、
+        // 上下两端飘到球外。优先取控件内部那个接近正方形、面积最大的子 View 当球体；
+        // 取不到就退回「以控件中心为圆心、边长取短边」的正方形。
         float inset = Util.dp(context, 4.0f);
-        oval.set(b.left + inset, b.top + inset, b.right - inset, b.bottom - inset);
+        oval.set(b.left, b.top, b.right, b.bottom);
+        if (!childBallRect(oval)) {
+            float side = Math.min(b.width(), b.height());
+            float left = b.exactCenterX() - side / 2f;
+            float top = b.exactCenterY() - side / 2f;
+            oval.set(left, top, left + side, top + side);
+        }
+        oval.inset(inset, inset);
+
+        float cx = oval.centerX();
+        float cy = oval.centerY();
+        float radius = Math.min(oval.width(), oval.height()) / 2f;
 
         for (int i = 0; i < 4; i++) {
             int gesture = i + 1;
@@ -153,6 +163,41 @@ final class BallOverlay extends Drawable {
         Paint.FontMetrics fm = textPaint.getFontMetrics();
         float baseline = cy - (fm.ascent + fm.descent) / 2f;
         canvas.drawText(label, cx, baseline, textPaint);
+    }
+
+    /**
+     * 在控件内部找真正的那颗球：可见、宽高接近、面积最大的子 View。
+     *
+     * <p>墨墨把球画在一个比球本身高出一截的容器里（多出来的部分通常是阴影或拖拽热区），
+     * 直接按容器画圆一定会偏，所以有子 View 就以子 View 为准。
+     *
+     * @return true 表示找到了并把坐标写进 out（坐标系与 Drawable bounds 一致）
+     */
+    private boolean childBallRect(RectF out) {
+        if (!(host instanceof ViewGroup)) return false;
+        ViewGroup group = (ViewGroup) host;
+        if (group.getChildCount() == 0) return false;
+
+        View best = null;
+        long bestArea = 0;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE) continue;
+            int w = child.getWidth();
+            int h = child.getHeight();
+            if (w <= 0 || h <= 0) continue;
+            // 只要接近正方形的：球是圆的，长条形的多半是阴影层或文字
+            if (Math.abs(w - h) > Math.min(w, h) * 0.15f) continue;
+            long area = (long) w * h;
+            if (area > bestArea) {
+                bestArea = area;
+                best = child;
+            }
+        }
+        if (best == null) return false;
+
+        out.set(best.getLeft(), best.getTop(), best.getRight(), best.getBottom());
+        return true;
     }
 
     private String shortLabel(String action) {

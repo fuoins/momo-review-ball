@@ -158,6 +158,12 @@ public final class FloatingButtonHook {
 
         sFound = true;
         XposedLog.i("已代理自带悬浮球，原有 listener=" + original);
+
+        // 球体几何诊断：控件本身不是正方形，真实球的区域靠这段日志确认
+        view.post(() -> XposedLog.i("球控件尺寸 " + view.getWidth() + "x" + view.getHeight()
+                + "，子View=" + (view instanceof ViewGroup
+                        ? ((ViewGroup) view).getChildCount() : -1)
+                + "，背景=" + view.getBackground()));
     }
 
     private static View.OnTouchListener readTouchListener(View view) {
