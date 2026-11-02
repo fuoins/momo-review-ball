@@ -91,8 +91,18 @@ public final class ActionExecutor {
     /** 当前是否已经显示答案：复习页出现「认识/忘记」评分按钮即视为已显示。 */
     public static boolean isAnswerShown(Activity activity) {
         if (activity == null) return false;
+
         View bar = findByIdName(activity, "rev_cl_operation_bar");
-        if (bar != null) return bar.isShown();
+        if (bar != null) {
+            if (!bar.isShown()) return false;
+            // 评分卡片在部分版本里整页常驻，必须内部按钮也可见才算答案已显示。
+            View know = findByIdName(activity, "rev_familiar");
+            View forget = findByIdName(activity, "rev_forget");
+            if (know != null && know.isShown()) return true;
+            if (forget != null && forget.isShown()) return true;
+            if (know == null && forget == null) return true;
+            return false;
+        }
 
         View root = activity.getWindow().getDecorView();
         boolean know = hasVisibleText(root, "认识");

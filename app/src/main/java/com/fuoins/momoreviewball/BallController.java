@@ -3,6 +3,7 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.content.res.Resources;
 import android.database.ContentObserver;
+import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -238,12 +239,20 @@ public final class BallController implements View.OnTouchListener {
             for (int id : ids) {
                 if (id == 0) continue;
                 View v = activity.findViewById(id);
-                if (v != null && v.isShown()) return true;
+                if (visibleOnScreen(v)) return true;
             }
         } catch (Throwable t) {
             Log.w(TAG, "控件探测失败", t);
         }
         return false;
+    }
+
+    /** 不仅要求 isShown()，还要在屏幕上占实际区域，排除被移出屏幕的预加载页面。 */
+    private static boolean visibleOnScreen(View v) {
+        if (v == null || !v.isShown()) return false;
+        Rect rect = new Rect();
+        if (!v.getGlobalVisibleRect(rect)) return false;
+        return rect.width() > 0 && rect.height() > 0;
     }
 
     private static int[] featureIds(Resources res, String pkg) {
