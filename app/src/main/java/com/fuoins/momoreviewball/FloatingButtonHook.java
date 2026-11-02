@@ -638,8 +638,12 @@ public final class FloatingButtonHook {
             }
 
             long downAt = SystemClock.uptimeMillis();
+            // 回放的是官方手势，官方可能带振动反馈；模块这边已经去掉振动，
+            // 这里临时关掉控件的触感反馈，结束后原样恢复。
+            boolean haptic = view.isHapticFeedbackEnabled();
             injecting = true;
             try {
+                view.setHapticFeedbackEnabled(false);
                 MotionEvent down = MotionEvent.obtain(downAt, downAt,
                         MotionEvent.ACTION_DOWN, cx, cy, 0);
                 view.dispatchTouchEvent(down);
@@ -666,6 +670,7 @@ public final class FloatingButtonHook {
                 XposedLog.w("回放原生球手势失败", t);
                 return false;
             } finally {
+                view.setHapticFeedbackEnabled(haptic);
                 injecting = false;
             }
         }
