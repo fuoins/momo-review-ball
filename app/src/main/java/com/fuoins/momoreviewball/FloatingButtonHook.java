@@ -544,6 +544,10 @@ public final class FloatingButtonHook {
                 if (config.haptic) {
                     v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
                 }
+            } else if (Config.ACTION_FAMILIAR.equals(action)) {
+                // 「熟知」不是默认按钮，点不到时直接把开关路径告诉用户
+                ActionExecutor.toast(activity,
+                        "「熟知」需要先在 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
             } else {
                 ActionExecutor.toast(activity, "当前页面没有可用的「" + label(action) + "」控件");
             }
