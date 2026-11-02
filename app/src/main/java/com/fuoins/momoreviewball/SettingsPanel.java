@@ -2,8 +2,10 @@ package com.fuoins.momoreviewball;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -95,8 +97,8 @@ public final class SettingsPanel {
                 usesFamiliar(config) ? View.VISIBLE : View.GONE);
 
         final TextView peekNotice = notice(activity,
-                "「瞄一眼」调用墨墨官方的瞄一眼（复习页快捷键 Ctrl+O），会弹出例句提示，"
-                        + "不需要拼写模式；快捷键失效时会退回点击页面上的「瞄一眼」控件。");
+                "「瞄一眼」走墨墨官方实现：页面上有「瞄一眼」按钮就直接点；没有就交给原生悬浮球的"
+                        + "手势触发（出现答案前才可用），不自己造提示层。");
         final Runnable syncPeek = () -> peekNotice.setVisibility(
                 containsAction(config.before, Config.ACTION_PEEK) ? View.VISIBLE : View.GONE);
 
@@ -178,7 +180,93 @@ public final class SettingsPanel {
         logHint.setPadding(0, Util.dp(activity, 2), 0, 0);
         card.addView(logHint);
 
+        // 底部放模块自己的信息：捐赠、源码、版本号。
+        // 放在原生「禁用」之前，整页还是同一条滚动流。
+        card.addView(sectionTitle(activity, "关于"));
+        card.addView(linkRow(activity, "捐赠支持", "zy520.de5.net/juanzeng",
+                "https://zy520.de5.net/juanzeng/"));
+        card.addView(linkRow(activity, "项目地址", "github.com/fuoins/momo-review-ball",
+                "https://github.com/fuoins/momo-review-ball"));
+        card.addView(infoRow(activity, "模块版本",
+                BuildConfig.VERSION_NAME + "（" + BuildConfig.VERSION_CODE + "）"));
+
         return card;
+    }
+
+    private static View linkRow(Activity activity, String title, String subtitle, String url) {
+        LinearLayout row = new LinearLayout(activity);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Util.dp(activity, 8);
+        row.setLayoutParams(lp);
+        int padV = Util.dp(activity, 6);
+        row.setPadding(0, padV, 0, padV);
+
+        LinearLayout texts = new LinearLayout(activity);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        TextView name = new TextView(activity);
+        name.setText(title);
+        name.setTextColor(TEXT);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        texts.addView(name);
+
+        TextView desc = new TextView(activity);
+        desc.setText(subtitle);
+        desc.setTextColor(SUB);
+        desc.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        desc.setPadding(0, Util.dp(activity, 2), 0, 0);
+        texts.addView(desc);
+        row.addView(texts);
+
+        TextView arrow = new TextView(activity);
+        arrow.setText("›");
+        arrow.setTextColor(0xFFB9BEC9);
+        arrow.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
+        arrow.setPadding(Util.dp(activity, 6), 0, 0, 0);
+        row.addView(arrow);
+
+        row.setOnClickListener(v -> openUrl(activity, url));
+        return row;
+    }
+
+    private static View infoRow(Activity activity, String title, String value) {
+        LinearLayout row = new LinearLayout(activity);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Util.dp(activity, 14);
+        row.setLayoutParams(lp);
+
+        TextView name = new TextView(activity);
+        name.setText(title);
+        name.setTextColor(TEXT);
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        name.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(name);
+
+        TextView valueText = new TextView(activity);
+        valueText.setText(value);
+        valueText.setTextColor(SUB);
+        valueText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        row.addView(valueText);
+        return row;
+    }
+
+    private static void openUrl(Activity activity, String url) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            activity.startActivity(intent);
+        } catch (Throwable t) {
+            ActionExecutor.toast(activity, "没有可用的浏览器：" + url);
+        }
     }
 
     /** 自定义大小：一行标题 + 百分比，下面滑杆，再下面实时预览的球。 */

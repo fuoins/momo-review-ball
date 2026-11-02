@@ -3,6 +3,7 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
+import android.os.SystemClock;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -73,6 +74,50 @@ public final class FloatingButtonHook {
 
     static boolean isFound() {
         return sFound;
+    }
+
+    /** 当前还在窗口里的球，优先取可见、有尺寸的那个。 */
+    private static View liveBall() {
+        View fallback = null;
+        synchronized (ATTACHED) {
+            for (Iterator<WeakReference<View>> it = ATTACHED.iterator(); it.hasNext(); ) {
+                View item = it.next().get();
+                if (item == null) {
+                    it.remove();
+                    continue;
+                }
+                if (item.getWindowToken() == null) continue;
+                if (item.isShown() && item.getWidth() > 0 && item.getHeight() > 0) return item;
+                if (fallback == null) fallback = item;
+            }
+        }
+        return fallback;
+    }
+
+    /**
+     * 把一整套「按下 - 滑动 - 抬起」原样交给墨墨自己的球处理。
+     *
+     * <p>墨墨的复习手势是写在球的 {@code dispatchTouchEvent} 里的（没有 OnTouchListener），
+     * 所以只能在模块拦截层开一个「放行」口子，把合成事件喂给它——
+     * 走的是应用自己的手势识别和动作分发，模块不复制任何业务逻辑。
+     *
+     * @param dir 1 上滑、2 下滑、3 左滑、4 右滑
+     */
+    static boolean replayNative(int dir) {
+        View ball = liveBall();
+        if (ball == null) {
+            XposedLog.w("回放原生手势：当前没有存活的球");
+            return false;
+        }
+        TouchHandler handler;
+        synchronized (HOOKED) {
+            handler = HOOKED.get(ball);
+        }
+        if (handler == null) {
+            XposedLog.w("回放原生手势：球没有挂上处理器");
+            return false;
+        }
+        return handler.replay(dir);
     }
 
     private static void hookInflate() {
@@ -557,6 +602,74 @@ public final class FloatingButtonHook {
             }
         }
 
+        /**
+         * 合成一次完整的滑动手势交给原生球。
+         *
+         * <p>{@link #injecting} 打开期间 {@link #onDispatch} 一律放行，
+         * 所以这些事件会原封不动走到墨墨自己的 {@code dispatchTouchEvent}，
+         * 由它判定方向并执行对应动作。
+         */
+        boolean replay(int dir) {
+            int w = view.getWidth();
+            int h = view.getHeight();
+            if (w <= 0 || h <= 0) return false;
+
+            float cx = w / 2f;
+            float cy = h / 2f;
+            // 真球只占控件中间一半，滑距按控件尺寸的 30% 取，稳过原生的 slop
+            float dist = Math.min(w, h) * 0.30f;
+            float dx = 0f;
+            float dy = 0f;
+            switch (dir) {
+                case 1:
+                    dy = -dist;
+                    break;
+                case 2:
+                    dy = dist;
+                    break;
+                case 3:
+                    dx = -dist;
+                    break;
+                case 4:
+                    dx = dist;
+                    break;
+                default:
+                    return false;
+            }
+
+            long downAt = SystemClock.uptimeMillis();
+            injecting = true;
+            try {
+                MotionEvent down = MotionEvent.obtain(downAt, downAt,
+                        MotionEvent.ACTION_DOWN, cx, cy, 0);
+                view.dispatchTouchEvent(down);
+                down.recycle();
+
+                int steps = 6;
+                for (int i = 1; i <= steps; i++) {
+                    long at = downAt + i * 18L;
+                    MotionEvent move = MotionEvent.obtain(downAt, at, MotionEvent.ACTION_MOVE,
+                            cx + dx * i / steps, cy + dy * i / steps, 0);
+                    view.dispatchTouchEvent(move);
+                    move.recycle();
+                }
+
+                long upAt = downAt + (steps + 1) * 18L;
+                MotionEvent up = MotionEvent.obtain(downAt, upAt,
+                        MotionEvent.ACTION_UP, cx + dx, cy + dy, 0);
+                view.dispatchTouchEvent(up);
+                up.recycle();
+
+                XposedLog.i("已回放原生球手势：方向=" + dir + "，滑距=" + Math.round(dist));
+                return true;
+            } catch (Throwable t) {
+                XposedLog.w("回放原生球手势失败", t);
+                return false;
+            } finally {
+                injecting = false;
+            }
+        }
+
         private void reset() {
             tracking = false;
             swiping = false;
@@ -606,9 +719,9 @@ public final class FloatingButtonHook {
                     ActionExecutor.toast(activity,
                             "「熟知」需要先在 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
                 } else if (Config.ACTION_PEEK.equals(action)) {
-                    // 官方「瞄一眼」是复习页的例句提示，走 Ctrl+O 快捷键
+                    // 瞄一眼走的是官方按钮 / 原生球手势，三路都没走通才提示
                     ActionExecutor.toast(activity,
-                            "「瞄一眼」没有响应：请在复习页面使用（需要页面已加载完单词）");
+                            "「瞄一眼」没有响应：当前页面没有可用的官方入口");
                 } else {
                     ActionExecutor.toast(activity, "当前页面没有可用的「" + label(action) + "」控件");
                 }
