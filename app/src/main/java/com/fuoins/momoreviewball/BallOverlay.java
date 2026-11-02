@@ -41,13 +41,14 @@ final class BallOverlay extends Drawable {
 
     /** 球面底色：盖住原生内容，同时保持球是浅色的，和墨墨整体风格一致。 */
     private static final int BASE_COLOR = 0xFFF7F8FA;
-    private static final int TEXT_COLOR = 0xFF1F2430;
+    private static final int BADGE_COLOR = 0xF21F2430;
     private static final int EDGE_COLOR = 0x1A000000;
     private static final int IDLE_COLOR = 0xFFDDE1E6;
 
     private final View host;
     private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF ball = new RectF();
@@ -87,6 +88,8 @@ final class BallOverlay extends Drawable {
         arcPaint.setStrokeCap(Paint.Cap.BUTT);
         basePaint.setStyle(Paint.Style.FILL);
         basePaint.setColor(BASE_COLOR);
+        badgePaint.setStyle(Paint.Style.FILL);
+        badgePaint.setColor(BADGE_COLOR);
         edgePaint.setStyle(Paint.Style.STROKE);
         edgePaint.setStrokeWidth(Math.max(1f, Util.dp(context, 0.7f)));
         edgePaint.setColor(EDGE_COLOR);
@@ -168,8 +171,9 @@ final class BallOverlay extends Drawable {
         float radius = Math.min(ball.width(), ball.height()) / 2f;
         if (radius < Util.dp(context, 8f)) return;
 
-        // 球体自己可能带阴影，往外留一点点，别把球撑大
-        ball.inset(radius * 0.02f, radius * 0.02f);
+        // 球体自己可能带阴影，往外留一点点，别把球撑大。
+        // 只留 1%：原生那条色环就贴在球的最外沿，留多了会露出一条原来的颜色。
+        ball.inset(radius * 0.01f, radius * 0.01f);
         radius = Math.min(ball.width(), ball.height()) / 2f;
         float cx = ball.centerX();
         float cy = ball.centerY();
@@ -189,11 +193,12 @@ final class BallOverlay extends Drawable {
         canvas.drawCircle(cx, cy, radius, basePaint);
         canvas.drawCircle(cx, cy, radius - edgePaint.getStrokeWidth() / 2f, edgePaint);
 
-        // ② 四段粗色带：贴着球内壁，位置正好压住原生那圈方向色
-        float bandWidth = radius * 0.30f;
-        float bandRadius = radius - bandWidth / 2f - radius * 0.03f;
+        // ② 四段粗色带：贴着球内壁，位置正好压住原生那圈方向色。
+        //    墨墨原生的四色是「连成一整圈」的，所以这里也几乎连成整圈（每段 86°，缝 4°），
+        //    否则留白处会露出原生那一圈，看着就像没盖干净。
+        float bandWidth = radius * 0.28f;
+        float bandRadius = radius - bandWidth / 2f - radius * 0.01f;
         band.set(cx - bandRadius, cy - bandRadius, cx + bandRadius, cy + bandRadius);
-        arcPaint.setStrokeWidth(bandWidth);
 
         for (int i = 0; i < 4; i++) {
             int gesture = i + 1;
@@ -204,12 +209,14 @@ final class BallOverlay extends Drawable {
 
             arcPaint.setColor(idle ? IDLE_COLOR : SettingsPanel.colorOf(action));
             arcPaint.setAlpha(dim ? 96 : 255);
+            arcPaint.setStrokeWidth(active ? bandWidth * (1f + 0.14f * progress) : bandWidth);
 
-            float sweep = active ? 74f + 24f * progress : 68f;
+            float sweep = active ? 82f + 14f * progress : 86f;
             canvas.drawArc(band, BAND_ANGLE[i] - sweep / 2f, sweep, false, arcPaint);
         }
 
-        // ③ 中心动作文字：静止时是「单击」的动作，滑动中换成该方向的动作
+        // ③ 中心动作文字：静止时是「单击」的动作，滑动中换成该方向的动作。
+        //    文字放在一个小圆底上，既保证对比度，也顺便把原生球心那点内容盖住。
         int shown = highlight > 0 ? highlight : 0;
         String action = config.actionFor(after, shown);
         if (Config.ACTION_NONE.equals(action)) return;
@@ -217,9 +224,13 @@ final class BallOverlay extends Drawable {
         String label = shortLabel(action);
         if (label.isEmpty()) return;
 
-        float textSize = label.length() >= 3 ? radius * 0.30f : radius * 0.38f;
+        float badgeRadius = radius * (highlight > 0 ? 0.44f : 0.40f);
+        badgePaint.setColor(highlight > 0 ? SettingsPanel.colorOf(action) : BADGE_COLOR);
+        canvas.drawCircle(cx, cy, badgeRadius, badgePaint);
+
+        float textSize = label.length() >= 3 ? badgeRadius * 0.56f : badgeRadius * 0.72f;
         textPaint.setTextSize(textSize);
-        textPaint.setColor(highlight > 0 ? SettingsPanel.colorOf(action) : TEXT_COLOR);
+        textPaint.setColor(Color.WHITE);
 
         Paint.FontMetrics fm = textPaint.getFontMetrics();
         float baseline = cy - (fm.ascent + fm.descent) / 2f;
