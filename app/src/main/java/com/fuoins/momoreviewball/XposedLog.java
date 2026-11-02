@@ -29,6 +29,15 @@ final class XposedLog {
     }
 
     private static void log(String level, String msg, Throwable t) {
+        // 同时进内存环形缓冲，设置页里可以一键导出，不用连电脑抓 logcat
+        try {
+            if (t == null) {
+                Diag.add(level, msg);
+            } else {
+                Diag.add(level, msg, t);
+            }
+        } catch (Throwable ignored) {
+        }
         try {
             de.robv.android.xposed.XposedBridge.log("MoMoBall[" + level + "] " + msg);
         } catch (Throwable ignored) {

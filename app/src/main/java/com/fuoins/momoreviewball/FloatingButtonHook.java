@@ -139,7 +139,13 @@ public final class FloatingButtonHook {
 
         // 球面标识：沿轮廓的四向色带 + 中心动作文字，纯叠加，不拦截触摸
         try {
+            XposedLog.i("准备挂载球面标识：host=" + view.getClass().getSimpleName()
+                    + " 尺寸=" + view.getWidth() + "x" + view.getHeight()
+                    + " 父=" + (view.getParent() == null
+                            ? "null" : view.getParent().getClass().getSimpleName())
+                    + " overlay=" + view.getOverlay());
             view.getOverlay().add(overlay);
+            XposedLog.i("球面标识已加入 overlay");
             overlay.start();
 
             // ViewOverlay 只在 add 的那一刻按控件宽高设一次 bounds。
@@ -178,6 +184,9 @@ public final class FloatingButtonHook {
                 + "，子View=" + (view instanceof ViewGroup
                         ? ((ViewGroup) view).getChildCount() : -1)
                 + "，背景=" + view.getBackground()));
+
+        // 复习页一出现就把日志落盘，设置页注入失败时也能从文件里拿到
+        view.postDelayed(() -> Diag.flush(view.getContext()), 1500L);
     }
 
     private static View.OnTouchListener readTouchListener(View view) {

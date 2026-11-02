@@ -124,6 +124,34 @@ public final class SettingsPanel {
         });
         card.addView(reset);
 
+        Button diag = new Button(activity);
+        diag.setText("导出诊断日志");
+        diag.setAllCaps(false);
+        diag.setTextColor(0xFF8A8F9C);
+        diag.setBackgroundColor(Color.TRANSPARENT);
+        diag.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        diag.setOnClickListener(v -> {
+            String text = Diag.build(activity);
+            java.io.File file = Diag.write(activity, text);
+            Diag.copyToClipboard(activity, text);
+            if (file != null) {
+                ActionExecutor.toast(activity, "已导出并复制到剪贴板\n" + file.getAbsolutePath());
+            } else {
+                ActionExecutor.toast(activity, "文件写入失败，日志已复制到剪贴板");
+            }
+        });
+        card.addView(diag);
+
+        // 最近几行事件：不用导出也能看到模块到底有没有接管到球
+        TextView recent = new TextView(activity);
+        recent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        recent.setTextColor(0xFF9AA0AC);
+        recent.setPadding(0, Util.dp(activity, 6), 0, 0);
+        recent.setText(Diag.recent(3));
+        recent.setOnClickListener(v -> recent.setText(Diag.recent(14)));
+        card.addView(recent);
+
         return card;
     }
 

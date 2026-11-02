@@ -45,6 +45,7 @@ final class BallOverlay extends Drawable {
     private boolean after;
     private boolean running;
     private boolean reported;
+    private boolean reportedZero;
     private int highlight = 0;
     private float progress = 0f;
 
@@ -78,6 +79,7 @@ final class BallOverlay extends Drawable {
         textPaint.setTypeface(Typeface.DEFAULT_BOLD);
         badgePaint.setColor(0xC4141B2E);
         badgePaint.setStyle(Paint.Style.FILL);
+        XposedLog.i("BallOverlay 已创建，host=" + host.getClass().getSimpleName());
     }
 
     void start() {
@@ -114,7 +116,13 @@ final class BallOverlay extends Drawable {
             // 所以尺寸拿不到时退回控件当前的实际大小。
             int w = host.getWidth();
             int h = host.getHeight();
-            if (w <= 0 || h <= 0) return;
+            if (w <= 0 || h <= 0) {
+                if (!reportedZero) {
+                    reportedZero = true;
+                    XposedLog.w("球面标识拿不到尺寸：bounds=0，控件也还是 0×0");
+                }
+                return;
+            }
             b.set(0, 0, w, h);
         }
 

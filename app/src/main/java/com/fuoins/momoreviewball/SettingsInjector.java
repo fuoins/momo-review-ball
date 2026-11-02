@@ -69,7 +69,10 @@ public final class SettingsInjector {
         root.postDelayed(() -> {
             try {
                 if (root.findViewWithTag(TAG) != null) return;
-                if (tryAttach(activity, root, attempt)) return;
+                if (tryAttach(activity, root, attempt)) {
+                    root.postDelayed(() -> Diag.flush(root.getContext()), 800L);
+                    return;
+                }
             } catch (Throwable t) {
                 XposedLog.e("注入设置失败（第 " + (attempt + 1) + " 次）", t);
                 if (attempt + 1 < MAX_ATTEMPTS) schedule(activity, root, attempt + 1);
