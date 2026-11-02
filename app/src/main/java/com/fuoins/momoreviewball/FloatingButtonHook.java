@@ -2,6 +2,8 @@ package com.fuoins.momoreviewball;
 
 import android.app.Activity;
 import android.graphics.Canvas;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.LayerDrawable;
 import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
@@ -9,6 +11,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 
 import org.xmlpull.v1.XmlPullParser;
 
@@ -259,50 +262,45 @@ public final class FloatingButtonHook {
         // 球面标识：沿轮廓的四向色带 + 中心动作文字。
         // 首选「在球自己的 draw() 之后补画」——坐标系天然正确、层级一定在最上；
         // 类没重写 draw/onDraw 时才退回父容器里的覆盖 View，再不行退回 ViewOverlay。
+        // 球面标识：沿轮廓的四向色带 + 中心动作文字。
+        //
+        // 这里改用控件自己的 foreground 承载，而不是 overlay / 兄弟 View / 绘制 hook：
+        //   · 框架保证 foreground 在 dispatchDraw 之后画，一定盖在球体所有内容上面；
+        //   · bounds 由控件在 onSizeChanged 里设置，尺寸天然跟随（448 还是 582 都对）；
+        //   · 按压缩放、拖动位移都作用在同一个控件上，不需要任何坐标同步；
+        //   · setForeground 会自动把 drawable 的 callback 指向控件，
+        //     invalidateSelf() 就能直接触发重绘。
         try {
+            Drawable old = null;
+            try {
+                old = view.getForeground();
+            } catch (Throwable ignored) {
+            }
+            overlay.setBounds(0, 0, Math.max(view.getWidth(), 1), Math.max(view.getHeight(), 1));
+            if (old == null) {
+                view.setForeground(overlay);
+            } else {
+                // 原生自己有 foreground 的场合，叠一层，别把原本的效果吃掉
+                view.setForeground(new LayerDrawable(new Drawable[]{old, overlay}));
+            }
             overlay.start();
             view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
                 @Override
                 public void onViewAttachedToWindow(View v) {
-                    synchronized (PAINTERS) {
-                        PAINTERS.put(v, overlay);
-                    }
                     overlay.start();
+                    v.invalidate();
                 }
 
                 @Override
                 public void onViewDetachedFromWindow(View v) {
                     overlay.stop();
-                    synchronized (PAINTERS) {
-                        PAINTERS.remove(v);
-                    }
                 }
             });
-
-            // 覆盖层只是过渡：球是子 View 自绘的，等它把子 View 铺好之后
-            // 把画布接到真正自绘的那个 View 上，再把这层撤掉。
-            // 第二个球实例（页面重建）也要走一遍，否则新实例没有绑定画家。
-            final BallCoverView cover;
-            if (sDrawHooked) {
-                cover = null;
-                XposedLog.i("球面标识由绘制 hook 承载，尺寸 " + view.getWidth() + "x" + view.getHeight());
-            } else {
-                XposedLog.i("准备挂载球面标识：host=" + view.getClass().getSimpleName()
-                        + " 尺寸=" + view.getWidth() + "x" + view.getHeight()
-                        + " 父=" + (view.getParent() == null
-                                ? "null" : view.getParent().getClass().getSimpleName()));
-                cover = BallCoverView.attach(view, overlay);
-            }
-            Runnable hookTask = () -> {
-                if (tryHookPaint(view, overlay) && cover != null) {
-                    cover.detach();
-                    XposedLog.i("已切换到绘制挂点，覆盖层已撤下");
-                }
-            };
-            view.post(hookTask);
-            view.postDelayed(hookTask, 700L);
+            XposedLog.i("球面标识已挂为 foreground，控件=" + view.getWidth() + "x" + view.getHeight()
+                    + "，原有 foreground=" + old);
         } catch (Throwable t) {
-            XposedLog.w("叠加球面标识失败", t);
+            XposedLog.w("挂 foreground 失败，退回 overlay", t);
+            attachOverlay(view, overlay);
         }
 
         sFound = true;
@@ -413,6 +411,10 @@ public final class FloatingButtonHook {
                     downY = event.getRawY();
                     lastRawX = downX;
                     lastRawY = downY;
+                    // 复习页的父容器（卡片 / ViewPager）会在 MOVE 阶段抢事件，
+                    // 一抢球就收到 CANCEL，表现就是「滑动时好时坏、大多没反应」。
+                    // 按下期间先把这个权利拿过来，抬手再还回去。
+                    disallowParentIntercept(v, true);
                     // 锁定位置时连按下都不给原生，否则它会播长按拖动的反馈动画
                     if (config.locked) return true;
                     return forward(v, event);
@@ -453,9 +455,14 @@ public final class FloatingButtonHook {
                 case MotionEvent.ACTION_UP: {
                     if (!tracking) return forward(v, event);
                     boolean wasDragging = dragging;
-                    // 用自己记的最后一个 MOVE 坐标，不依赖抬手事件本身
-                    float dx = lastRawX - downX;
-                    float dy = lastRawY - downY;
+                    // 优先用抬手点算位移：快速滑动时 MOVE 采样可能只有一两个，
+                    // 只信 lastRaw 会把一次明显的滑动判成点击。
+                    float dx = event.getRawX() - downX;
+                    float dy = event.getRawY() - downY;
+                    if (Math.hypot(lastRawX - downX, lastRawY - downY) > Math.hypot(dx, dy)) {
+                        dx = lastRawX - downX;
+                        dy = lastRawY - downY;
+                    }
                     reset();
                     overlay.setHighlight(0, 0f);
 
@@ -466,7 +473,8 @@ public final class FloatingButtonHook {
 
                     // 拦下这次抬手：先给原生补一个 CANCEL 清理按压态，原生动作就不会触发
                     if (!config.locked) cancelNative(v, event);
-                    if (Math.hypot(dx, dy) <= slop * 1.5f) {
+                    float dist = (float) Math.hypot(dx, dy);
+                    if (dist <= slop * 1.2f) {
                         runAction(v, 0, config);
                     } else {
                         runAction(v, direction(dx, dy), config);
@@ -476,6 +484,7 @@ public final class FloatingButtonHook {
 
                 case MotionEvent.ACTION_CANCEL:
                     reset();
+                    overlay.setHighlight(0, 0f);
                     return forward(v, event);
 
                 default:
@@ -511,6 +520,16 @@ public final class FloatingButtonHook {
         private void reset() {
             tracking = false;
             dragging = false;
+            disallowParentIntercept(view, false);
+        }
+
+        /** 临时把「父容器不得抢事件」的权利拿到手，抬手就还回去。 */
+        private void disallowParentIntercept(View v, boolean disallow) {
+            try {
+                ViewParent parent = v.getParent();
+                if (parent != null) parent.requestDisallowInterceptTouchEvent(disallow);
+            } catch (Throwable ignored) {
+            }
         }
 
         private int direction(float dx, float dy) {
@@ -524,11 +543,15 @@ public final class FloatingButtonHook {
 
             boolean answerShown = ActionExecutor.isAnswerShown(activity);
             String action = config.actionFor(answerShown, gestureIndex);
-            XposedLog.d("gesture=" + Config.GESTURE_LABELS[gestureIndex]
-                    + " 已显示答案=" + answerShown + " 动作=" + action);
-            if (Config.ACTION_NONE.equals(action)) return;
-
+            if (Config.ACTION_NONE.equals(action)) {
+                XposedLog.d("gesture=" + Config.GESTURE_LABELS[gestureIndex]
+                        + " 已显示答案=" + answerShown + " 动作=未配置");
+                return;
+            }
             boolean ok = ActionExecutor.execute(activity, action, v);
+            XposedLog.d("gesture=" + Config.GESTURE_LABELS[gestureIndex]
+                    + " 已显示答案=" + answerShown + " 动作=" + action + " 执行=" + ok);
+
             if (ok) {
                 if (config.haptic) {
                     v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
