@@ -27,7 +27,7 @@ public final class Config {
     public static final String ACTION_FAMILIAR = "familiar";
     public static final String ACTION_PRONOUNCE = "pronounce";
     public static final String ACTION_SHOW = "show";
-    /** 官方「瞄一眼」：拼写模式输入条上的眼睛按钮，不是模块自己画的气泡。 */
+    /** 官方「瞄一眼」：答案出现前原生悬浮球左滑触发的例句提示，不是模块自己画的气泡。 */
     public static final String ACTION_PEEK = "peek";
     public static final String ACTION_PREV = "prev";
 

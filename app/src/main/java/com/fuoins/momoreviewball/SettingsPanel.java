@@ -97,8 +97,8 @@ public final class SettingsPanel {
                 usesFamiliar(config) ? View.VISIBLE : View.GONE);
 
         final TextView peekNotice = notice(activity,
-                "「瞄一眼」走墨墨官方实现：页面上有「瞄一眼」按钮就直接点；没有就交给原生悬浮球的"
-                        + "手势触发（出现答案前才可用），不自己造提示层。");
+                "「瞄一眼」走墨墨官方实现：页面上有按钮就直接点；没有就把「左滑」回放给原生悬浮球"
+                        + "（墨墨默认：出现答案前左滑＝瞄一眼），不自己造提示层。");
         final Runnable syncPeek = () -> peekNotice.setVisibility(
                 containsAction(config.before, Config.ACTION_PEEK) ? View.VISIBLE : View.GONE);
 

@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
 import android.os.SystemClock;
+import android.view.InputDevice;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -100,6 +101,9 @@ public final class FloatingButtonHook {
      * <p>墨墨的复习手势是写在球的 {@code dispatchTouchEvent} 里的（没有 OnTouchListener），
      * 所以只能在模块拦截层开一个「放行」口子，把合成事件喂给它——
      * 走的是应用自己的手势识别和动作分发，模块不复制任何业务逻辑。
+     *
+     * <p><b>方向以原生默认为准</b>：复习页「出现答案前」的原生球手势里，
+     * 左滑＝瞄一眼（上滑＝发音、右滑＝返回上一个单词）。
      *
      * @param dir 1 上滑、2 下滑、3 左滑、4 右滑
      */
@@ -608,6 +612,17 @@ public final class FloatingButtonHook {
          * <p>{@link #injecting} 打开期间 {@link #onDispatch} 一律放行，
          * 所以这些事件会原封不动走到墨墨自己的 {@code dispatchTouchEvent}，
          * 由它判定方向并执行对应动作。
+         *
+         * <p>三处细节决定了「回放了但毫无反应」会不会发生：
+         * <ul>
+         *   <li><b>raw 坐标</b>：{@code MotionEvent.obtain} 造出来的事件 raw 等于局部坐标，
+         *       原生若拿 {@code getRawX()} 判断「手指是不是在球上」，拿到的是屏幕左上角
+         *       附近一个根本不存在的点，手势直接被丢掉。用 {@code offsetLocation}
+         *       把 raw 偏移补成球在屏幕上的真实位置。</li>
+         *   <li><b>事件来源</b>：标成触摸屏，避免原生按 source 过滤。</li>
+         *   <li><b>投递对象</b>：先给容器，容器不接（返回 false）再直接喂原生
+         *       {@code OnTouchListener}，覆盖手势挂在子 View 上的版本。</li>
+         * </ul>
          */
         boolean replay(int dir) {
             int w = view.getWidth();
@@ -616,8 +631,8 @@ public final class FloatingButtonHook {
 
             float cx = w / 2f;
             float cy = h / 2f;
-            // 真球只占控件中间一半，滑距按控件尺寸的 30% 取，稳过原生的 slop
-            float dist = Math.min(w, h) * 0.30f;
+            // 真球只占控件中间一半，滑距按控件尺寸取，稳过原生的 slop
+            float dist = Math.min(w, h) * 0.34f;
             float dx = 0f;
             float dy = 0f;
             switch (dir) {
@@ -637,6 +652,12 @@ public final class FloatingButtonHook {
                     return false;
             }
 
+            int[] screen = new int[2];
+            try {
+                view.getLocationOnScreen(screen);
+            } catch (Throwable ignored) {
+            }
+
             long downAt = SystemClock.uptimeMillis();
             // 回放的是官方手势，官方可能带振动反馈；模块这边已经去掉振动，
             // 这里临时关掉控件的触感反馈，结束后原样恢复。
@@ -644,27 +665,15 @@ public final class FloatingButtonHook {
             injecting = true;
             try {
                 view.setHapticFeedbackEnabled(false);
-                MotionEvent down = MotionEvent.obtain(downAt, downAt,
-                        MotionEvent.ACTION_DOWN, cx, cy, 0);
-                view.dispatchTouchEvent(down);
-                down.recycle();
-
-                int steps = 6;
-                for (int i = 1; i <= steps; i++) {
-                    long at = downAt + i * 18L;
-                    MotionEvent move = MotionEvent.obtain(downAt, at, MotionEvent.ACTION_MOVE,
-                            cx + dx * i / steps, cy + dy * i / steps, 0);
-                    view.dispatchTouchEvent(move);
-                    move.recycle();
+                boolean consumed = sendSequence(true, downAt, cx, cy, dx, dy, screen);
+                if (!consumed && original != null) {
+                    // 容器没吃这串事件（手势听在子 View 或 listener 上），直接投给原生 listener
+                    consumed = sendSequence(false, downAt, cx, cy, dx, dy, screen);
+                    XposedLog.i("回放：容器未消费，已改投原生 OnTouchListener");
                 }
-
-                long upAt = downAt + (steps + 1) * 18L;
-                MotionEvent up = MotionEvent.obtain(downAt, upAt,
-                        MotionEvent.ACTION_UP, cx + dx, cy + dy, 0);
-                view.dispatchTouchEvent(up);
-                up.recycle();
-
-                XposedLog.i("已回放原生球手势：方向=" + dir + "，滑距=" + Math.round(dist));
+                XposedLog.i("已回放原生球手势：方向=" + dir + "（" + dirName(dir) + "），滑距="
+                        + Math.round(dist) + "，原生消费=" + consumed
+                        + "，屏幕位置=(" + screen[0] + ',' + screen[1] + ')');
                 return true;
             } catch (Throwable t) {
                 XposedLog.w("回放原生球手势失败", t);
@@ -672,6 +681,74 @@ public final class FloatingButtonHook {
             } finally {
                 view.setHapticFeedbackEnabled(haptic);
                 injecting = false;
+            }
+        }
+
+        /**
+         * 发一整串 DOWN → MOVE × n → UP。
+         *
+         * @param dispatch true 走 {@code dispatchTouchEvent}；false 直接调原生 listener
+         * @return DOWN 是否被消费
+         */
+        private boolean sendSequence(boolean dispatch, long downAt, float cx, float cy,
+                                     float dx, float dy, int[] screen) {
+            int steps = 8;
+            boolean downHandled = false;
+            for (int i = 0; i <= steps + 1; i++) {
+                long at = downAt + i * 16L;
+                float ratio = Math.min(1f, i / (float) steps);
+                float x = cx + dx * ratio;
+                float y = cy + dy * ratio;
+                int action = i == 0 ? MotionEvent.ACTION_DOWN
+                        : (i > steps ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE);
+                MotionEvent event = obtain(downAt, at, action, x, y, screen);
+                boolean handled;
+                try {
+                    if (dispatch) {
+                        handled = view.dispatchTouchEvent(event);
+                    } else {
+                        handled = original != null && original.onTouch(view, event);
+                    }
+                } catch (Throwable t) {
+                    handled = false;
+                } finally {
+                    event.recycle();
+                }
+                if (i == 0) downHandled = handled;
+            }
+            return downHandled;
+        }
+
+        /**
+         * 造一个「看起来像真手指」的事件。
+         *
+         * <p>{@code obtain(...)} 里的 x/y 是控件内坐标，raw 默认与之相同；
+         * 调 {@code offsetLocation(屏幕左上角)} 后 raw 变成屏幕坐标，而 x/y 不变，
+         * 和真实触摸事件的结构完全一致。
+         */
+        private MotionEvent obtain(long downAt, long at, int action,
+                                   float x, float y, int[] screen) {
+            MotionEvent event = MotionEvent.obtain(downAt, at, action, x, y, 0);
+            event.offsetLocation(screen[0], screen[1]);
+            try {
+                event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+            } catch (Throwable ignored) {
+            }
+            return event;
+        }
+
+        private String dirName(int dir) {
+            switch (dir) {
+                case 1:
+                    return "上滑";
+                case 2:
+                    return "下滑";
+                case 3:
+                    return "左滑";
+                case 4:
+                    return "右滑";
+                default:
+                    return "未知";
             }
         }
 

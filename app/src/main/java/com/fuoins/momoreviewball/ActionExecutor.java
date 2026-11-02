@@ -3,6 +3,7 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -126,32 +127,64 @@ public final class ActionExecutor {
      * 官方「瞄一眼」。
      *
      * <p>墨墨的「瞄一眼」是复习页自带的功能：答案还没出现时，用它看一眼例句提示。
-     * 它有两个官方入口——中英 / 拼写模式工具条上的「瞄一眼」按钮，
-     * 以及答案出现前悬浮球上的手势（设置里写明「发音，瞄一眼、返回上一个单词等操作」）。
-     * 这里按「按钮 → 原生球手势 → Ctrl+O 快捷键」的顺序调用应用自己的实现，
-     * 不自绘任何提示层。
+     * 官方给的入口只有两个，都不是可见按钮：
+     * <ul>
+     *   <li>复习页悬浮球在「出现答案前」的<b>左滑</b>（资源里的说明原文：
+     *       「发音，瞄一眼、返回上一个单词等操作」）；</li>
+     *   <li>键盘快捷键 <b>Ctrl+O</b>（快捷键帮助原文：「Ctrl+O => 瞄一眼」）。</li>
+     * </ul>
+     * 所以这里把「左滑」原样回放给原生球，由墨墨自己的手势识别执行，
+     * 完全不复制它的业务逻辑，也不自绘任何提示层。
      */
     private static boolean peek(Activity activity) {
-        // ① 页面上真有官方「瞄一眼」按钮（中英 / 手写 / 键盘拼写模式的工具条）就直接点它
+        // ① 个别版本/模式下工具条上会直接出现「瞄一眼」控件，有就点
         if (clickPeekControl(activity)) return true;
 
-        // ② 复习页的「瞄一眼」本身是悬浮球的一个手势：设置里
-        //    「出现答案前显示悬浮球」的说明就是「发音，瞄一眼、返回上一个单词等操作」。
-        //    这里把一整套「按下 - 下滑 - 抬起」交给原生球，由墨墨自己的手势识别执行，
-        //    效果和手滑原生球完全一致，不是模块另画一层。
-        //    只在答案出现前回放：答案出来以后同一个方向可能是「忘记」，不能冒险。
-        if (!isAnswerShown(activity) && FloatingButtonHook.replayNative(2)) {
-            XposedLog.i("瞄一眼：已回放原生球「下滑」手势");
+        // ② 主路径：把「左滑」交给原生悬浮球
+        if (!isAnswerShown(activity) && FloatingButtonHook.replayNative(3)) {
+            XposedLog.i("瞄一眼：已把「左滑」交给原生悬浮球");
+            // 回放是同步投递、异步生效。350ms 后界面文案一点没变，说明原生没接住
+            // （版本差异 / 手势被改过），再补一次 Ctrl+O，避免「回放了但毫无反应」。
+            final String before = visibleTextSignature(activity);
+            activity.getWindow().getDecorView().postDelayed(() -> {
+                try {
+                    if (!before.equals(visibleTextSignature(activity))) {
+                        XposedLog.i("瞄一眼：左滑回放已生效");
+                        return;
+                    }
+                    XposedLog.w("瞄一眼：左滑回放后界面无变化，改发 Ctrl+O");
+                    if (!sendPeekShortcut(activity)) {
+                        XposedLog.w("瞄一眼：左滑与 Ctrl+O 都没有反应，可见文案="
+                                + dumpTexts(activity));
+                        toast(activity, "「瞄一眼」没有响应，可在设置页导出日志反馈");
+                    }
+                } catch (Throwable ignored) {
+                }
+            }, 350L);
             return true;
         }
 
-        // ③ 兜底：官方快捷键 Ctrl+O（部分版本带键盘时可用）
+        // ③ 兜底：官方快捷键 Ctrl+O
         boolean ok = sendPeekShortcut(activity);
         if (!ok) {
-            XposedLog.w("瞄一眼：按钮 / 原生手势 / Ctrl+O 都不可用；可见文案="
+            XposedLog.w("瞄一眼：控件 / 左滑回放 / Ctrl+O 均不可用；可见文案="
                     + dumpTexts(activity));
         }
         return ok;
+    }
+
+    /** 当前可见文案的指纹，用来判断回放后界面到底有没有变化。 */
+    private static String visibleTextSignature(Activity activity) {
+        ArrayList<TextView> views = new ArrayList<>();
+        collectTextViews(activity.getWindow().getDecorView(), views);
+        StringBuilder builder = new StringBuilder();
+        for (TextView view : views) {
+            if (!view.isShown()) continue;
+            String text = normalize(view.getText());
+            if (text.length() == 0) continue;
+            builder.append(text).append('\n');
+        }
+        return builder.toString();
     }
 
     /** 页面上如果直接有「瞄一眼」控件（文字或 contentDescription），优先点它。 */
@@ -197,23 +230,51 @@ public final class ActionExecutor {
     }
 
     /**
-     * 官方快捷键 Ctrl+O = 瞄一眼。直接交给 Activity 的事件分发，
-     * 应用自己的 onKeyDown / dispatchKeyEvent 会执行和球上手势完全相同的逻辑。
+     * 官方快捷键 Ctrl+O = 瞄一眼（快捷键帮助里写死的）。
+     *
+     * <p>直接交给 Activity 的事件分发，应用自己的 onKeyDown / dispatchKeyEvent
+     * 会执行和球上手势完全相同的逻辑。合成的 KeyEvent 必须标成键盘来源，
+     * 否则部分实现会按 source 过滤掉；分发改不动时再直接调 onKeyDown 兜底。
      */
     private static boolean sendPeekShortcut(Activity activity) {
         try {
-            long now = SystemClock.uptimeMillis();
-            int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
-            KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
-                    KeyEvent.KEYCODE_O, 0, meta);
-            KeyEvent up = new KeyEvent(now, now + 40, KeyEvent.ACTION_UP,
-                    KeyEvent.KEYCODE_O, 0, meta);
-            boolean consumed = activity.dispatchKeyEvent(down);
-            consumed |= activity.dispatchKeyEvent(up);
-            XposedLog.i("瞄一眼：已发送官方快捷键 Ctrl+O，consumed=" + consumed);
-            return consumed;
+            boolean consumed = activity.dispatchKeyEvent(peekKey(KeyEvent.ACTION_DOWN, 0));
+            consumed |= activity.dispatchKeyEvent(peekKey(KeyEvent.ACTION_UP, 40));
+            if (consumed) {
+                XposedLog.i("瞄一眼：Ctrl+O 已被应用消费");
+                return true;
+            }
+            // 分发链被某个输入框吃掉时（返回 true 却没动作）这条也未必有效，
+            // 但至少能覆盖「Window 没把按键交给 Activity」的版本
+            boolean direct = callKeyDown(activity);
+            XposedLog.i("瞄一眼：Ctrl+O 分发未消费，直调 onKeyDown=" + direct);
+            return direct;
         } catch (Throwable t) {
             XposedLog.w("瞄一眼：Ctrl+O 发送失败", t);
+            return false;
+        }
+    }
+
+    private static KeyEvent peekKey(int action, long delay) {
+        long now = SystemClock.uptimeMillis();
+        int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
+        KeyEvent event = new KeyEvent(now, now + delay, action, KeyEvent.KEYCODE_O, 0, meta);
+        try {
+            event.setSource(InputDevice.SOURCE_KEYBOARD);
+        } catch (Throwable ignored) {
+        }
+        return event;
+    }
+
+    /** 反射直调 Activity.onKeyDown（会虚分派到墨墨自己的重写版本）。 */
+    private static boolean callKeyDown(Activity activity) {
+        try {
+            java.lang.reflect.Method method =
+                    Activity.class.getDeclaredMethod("onKeyDown", int.class, KeyEvent.class);
+            method.setAccessible(true);
+            Object result = method.invoke(activity, KeyEvent.KEYCODE_O, peekKey(KeyEvent.ACTION_DOWN, 0));
+            return Boolean.TRUE.equals(result);
+        } catch (Throwable t) {
             return false;
         }
     }
