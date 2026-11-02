@@ -3,6 +3,8 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.LayoutInflater;
@@ -650,8 +652,22 @@ public final class FloatingButtonHook {
         private boolean tracking;
         private boolean swiping;
         private boolean dragging;
+        /** 滑动分几帧走完。 */
+        private static final int STEPS = 10;
+        /** 每帧间隔，接近真手指 60Hz 的采样间隔。 */
+        private static final int MOVE_STEP_MS = 16;
+        /** 滑到位后按住多久：官方「瞄一眼」是按住预览、松手即恢复。 */
+        private static final long HOLD_MS = 1500L;
+
         /** 正在给原生补发 CANCEL，这一趟的分发要原样放行。 */
         private boolean injecting;
+        /**
+         * 正在回放的手势的 downTime。所有球共享一把：注入的事件会经过别的球的
+         * 分发链路，必须统一放行，否则模块会把「自己造的手势」当成用户手势再执行一次。
+         */
+        private static volatile long injectingDownTime;
+        /** 回放前的触感开关，回放结束要按原值还回去。 */
+        private boolean savedHaptic = true;
 
         private long downAt;
         private float downX;
@@ -670,6 +686,8 @@ public final class FloatingButtonHook {
 
         Boolean onDispatch(View v, MotionEvent event) {
             if (injecting) return null;
+            // 自己回放的事件：原样交给墨墨，绝不能再走一遍模块的手势判定
+            if (injectingDownTime != 0 && event.getDownTime() == injectingDownTime) return null;
 
             Config config = Config.get(v.getContext());
             if (!config.enabled) {
@@ -808,164 +826,269 @@ public final class FloatingButtonHook {
         }
 
         /**
-         * 合成一次完整的滑动手势交给原生球。
+         * 合成一次「按下 - 滑到位 - 按住不放 - 抬起」的手势交给原生球。
          *
-         * <p>{@link #injecting} 打开期间 {@link #onDispatch} 一律放行，
-         * 所以这些事件会原封不动走到墨墨自己的 {@code dispatchTouchEvent}，
-         * 由它判定方向并执行对应动作。
+         * <p><b>关键在于「按住」</b>：墨墨的「瞄一眼」不是抬手才触发，而是手指滑到
+         * 左滑位置、<b>还没离开屏幕</b>时把例句顶出来，松手立刻恢复原状。
+         * 之前把 DOWN → MOVE → UP 在同一个同步循环里一口气发完，整个过程不到一帧，
+         * 界面连一次绘制都没走到，日志里就只能是「回放成功、界面无变化」。
          *
-         * <p>三处细节决定了「回放了但毫无反应」会不会发生：
-         * <ul>
-         *   <li><b>raw 坐标</b>：{@code MotionEvent.obtain} 造出来的事件 raw 等于局部坐标，
-         *       原生若拿 {@code getRawX()} 判断「手指是不是在球上」，拿到的是屏幕左上角
-         *       附近一个根本不存在的点，手势直接被丢掉。用 {@code offsetLocation}
-         *       把 raw 偏移补成球在屏幕上的真实位置。</li>
-         *   <li><b>事件来源</b>：标成触摸屏，避免原生按 source 过滤。</li>
-         *   <li><b>投递对象</b>：先给容器，容器不接（返回 false）再直接喂原生
-         *       {@code OnTouchListener}，覆盖手势挂在子 View 上的版本。</li>
-         * </ul>
+         * <p>所以把整个手势拆到多帧：
+         * <ol>
+         *   <li>DOWN 同步投递，先确定哪一层接住了（球 onTouchEvent → 球分发 → Activity 分发）；</li>
+         *   <li>每 16ms 发一个 MOVE，位移和间隔都贴近真手指；</li>
+         *   <li>到位后<b>按住 1.5 秒不发 UP</b>，让原生维持「预览例句」的状态；</li>
+         *   <li>最后补 UP 收场，界面自行恢复。</li>
+         * </ol>
          */
-        boolean replay(int dir) {
-            int w = view.getWidth();
-            int h = view.getHeight();
+        boolean replay(final int dir) {
+            final int w = view.getWidth();
+            final int h = view.getHeight();
             if (w <= 0 || h <= 0) return false;
 
-            float dist = Math.min(w, h) * 0.34f;
-            float dx = 0f;
-            float dy = 0f;
+            // 球直径约占控件一半，滑到 46% 明确越过原生激活阈值，又不会把球甩出边界
+            final float dist = Math.min(w, h) * 0.46f;
+            final float dx;
+            final float dy;
             switch (dir) {
                 case 1:
+                    dx = 0f;
                     dy = -dist;
                     break;
                 case 2:
+                    dx = 0f;
                     dy = dist;
                     break;
                 case 3:
                     dx = -dist;
+                    dy = 0f;
                     break;
                 case 4:
                     dx = dist;
+                    dy = 0f;
                     break;
                 default:
                     return false;
             }
 
+            final long downAt = SystemClock.uptimeMillis();
+            final Target target = pickTarget(w, h, dx, dy, downAt);
+            if (target == null) {
+                XposedLog.w("回放：" + dirName(dir) + " 没有任何层级接受 DOWN，放弃");
+                return false;
+            }
+
+            // 回放的是官方手势，官方可能带振动反馈；模块这边已经去掉振动，临时关掉
+            savedHaptic = view.isHapticFeedbackEnabled();
+            view.setHapticFeedbackEnabled(false);
+            injectingDownTime = downAt;
+
+            XposedLog.i("已按下原生球：方向=" + dir + "（" + dirName(dir) + "），投递="
+                    + target.name + "，滑距=" + Math.round(dist) + "，球屏幕位置=("
+                    + target.screenX + ',' + target.screenY + ')');
+
+            play(target, dir);
+
+            // 兜底：万一中途页面被销毁，别让 injectingDownTime 永久挂着
+            view.postDelayed(this::finishInjection, MOVE_STEP_MS * STEPS + HOLD_MS + 3000L);
+            return true;
+        }
+
+        /** 依次试三层入口，第一个接住 DOWN 的就是这次注入的目标。 */
+        private Target pickTarget(int w, int h, float dx, float dy, long downAt) {
             int[] screen = new int[2];
             try {
                 view.getLocationOnScreen(screen);
             } catch (Throwable ignored) {
             }
 
-            long downAt = SystemClock.uptimeMillis();
-            // 回放的是官方手势，官方可能带振动反馈；模块这边已经去掉振动，
-            // 这里临时关掉控件的触感反馈，结束后原样恢复。
-            boolean haptic = view.isHapticFeedbackEnabled();
-            injecting = true;
+            // ① 直调球的 onTouchEvent：方法列表证实墨墨在球自己身上声明了 onTouchEvent/1
+            Target target = new Target(event -> view.onTouchEvent(event), "球 onTouchEvent",
+                    w / 2f, h / 2f, dx, dy, screen, downAt);
+            if (target.down()) return target;
+
+            // ② 走一遍球的分发，覆盖手势判定写在 onInterceptTouchEvent 的版本
+            target = new Target(event -> view.dispatchTouchEvent(event), "球 dispatchTouchEvent",
+                    w / 2f, h / 2f, dx, dy, screen, downAt);
+            if (target.down()) return target;
+
+            // ③ 从 Activity 重新分发：事件要窗口坐标，raw 用屏幕坐标
+            Activity activity = Util.findActivity(view.getContext());
+            if (activity == null) return null;
+            int[] win = new int[2];
             try {
-                view.setHapticFeedbackEnabled(false);
+                view.getLocationInWindow(win);
+            } catch (Throwable ignored) {
+                win[0] = screen[0];
+                win[1] = screen[1];
+            }
+            int[] rawOffset = {screen[0] - win[0], screen[1] - win[1]};
+            target = new Target(event -> activity.dispatchTouchEvent(event), "Activity 分发",
+                    win[0] + w / 2f, win[1] + h / 2f, dx, dy, rawOffset, downAt);
+            if (!target.down()) return null;
 
-                // ① 直调球的 onTouchEvent：类方法列表里有 onTouchEvent/1，说明墨墨的
-                //    触摸处理就在球自己身上。直调可以绕开父容器（ViewPager / 返回手势层）
-                //    在 MOVE 阶段的拦截。
-                String where = "球 onTouchEvent";
-                boolean consumed = sendSequence(event -> view.onTouchEvent(event),
-                        w / 2f, h / 2f, dx, dy, screen, downAt);
-
-                // ② 再走一次正常分发，覆盖「手势判定写在 onInterceptTouchEvent」的版本
-                if (!consumed) {
-                    where = "球 dispatchTouchEvent";
-                    consumed = sendSequence(event -> view.dispatchTouchEvent(event),
-                            w / 2f, h / 2f, dx, dy, screen, downAt);
+            // 按住期间禁止 ViewPager / 返回手势层在 MOVE 阶段把事件抢走
+            ViewParent parent = view.getParent();
+            if (parent != null) {
+                try {
+                    parent.requestDisallowInterceptTouchEvent(true);
+                } catch (Throwable ignored) {
                 }
-
-                // ③ 球自己不吃 DOWN，说明墨墨的球手势是「悬浮层」统一处理的，写在
-                //    页面/Activity 的 dispatchTouchEvent 里。从 Activity 层重新走一遍
-                //    完整分发，等价于用户真的在球上滑了一下。
-                //    DOWN 没人接就立刻发 CANCEL，绝不会把这次注入变成一次页面点击。
-                if (!consumed) {
-                    Activity activity = Util.findActivity(view.getContext());
-                    if (activity != null) {
-                        // Activity 收到的是「窗口坐标」，不是屏幕坐标：状态栏存在时两者
-                        // 差一截，直接拿屏幕坐标会点偏。这里分开算，raw 仍补回屏幕坐标。
-                        int[] win = new int[2];
-                        try {
-                            view.getLocationInWindow(win);
-                        } catch (Throwable ignored) {
-                            win[0] = screen[0];
-                            win[1] = screen[1];
-                        }
-                        int[] rawOffset = {screen[0] - win[0], screen[1] - win[1]};
-                        where = "Activity 分发";
-                        // 阻止 ViewPager / 返回手势层在 MOVE 阶段把事件抢走
-                        ViewParent parent = view.getParent();
-                        if (parent != null) parent.requestDisallowInterceptTouchEvent(true);
-                        consumed = sendSequence(event -> activity.dispatchTouchEvent(event),
-                                win[0] + w / 2f, win[1] + h / 2f, dx, dy, rawOffset, downAt);
-                        if (parent != null) parent.requestDisallowInterceptTouchEvent(false);
+                view.postDelayed(() -> {
+                    try {
+                        parent.requestDisallowInterceptTouchEvent(false);
+                    } catch (Throwable ignored) {
                     }
-                }
+                }, MOVE_STEP_MS * STEPS + HOLD_MS + 300L);
+            }
+            return target;
+        }
 
-                XposedLog.i("已回放原生球手势：方向=" + dir + "（" + dirName(dir) + "），滑距="
-                        + Math.round(dist) + "，投递=" + where + "，原生消费=" + consumed
-                        + "，球屏幕位置=(" + screen[0] + ',' + screen[1] + ')');
-                return true;
+        /** 分帧播放滑动段，到位后按住，最后松手。 */
+        private void play(final Target target, final int dir) {
+            final Handler handler = new Handler(Looper.getMainLooper());
+
+            for (int i = 1; i <= STEPS; i++) {
+                final int step = i;
+                handler.postDelayed(() -> {
+                    if (!attached()) return;
+                    float ratio = step / (float) STEPS;
+                    send(target, MotionEvent.ACTION_MOVE,
+                            target.x0 + target.dx * ratio, target.y0 + target.dy * ratio,
+                            target.downAt + step * MOVE_STEP_MS);
+                }, (long) step * MOVE_STEP_MS);
+            }
+
+            handler.postDelayed(() -> {
+                if (!attached()) {
+                    finishInjection();
+                    return;
+                }
+                XposedLog.i("瞄一眼：手指已滑到" + dirName(dir) + "位置并按住不放，等原生预览例句");
+                // 按住 400ms 时看一次：这正是官方「瞄一眼」预览例句的窗口
+                handler.postDelayed(() -> logPreview(target, "按住期间"), 400L);
+
+                handler.postDelayed(() -> {
+                    send(target, MotionEvent.ACTION_UP,
+                            target.x0 + target.dx, target.y0 + target.dy,
+                            target.downAt + STEPS * MOVE_STEP_MS + HOLD_MS);
+                    finishInjection();
+                    XposedLog.i("瞄一眼：已松手，界面应自行恢复");
+                    handler.postDelayed(() -> logPreview(target, "松手之后"), 400L);
+                }, HOLD_MS);
+            }, (long) STEPS * MOVE_STEP_MS);
+        }
+
+        private boolean attached() {
+            try {
+                return view.isAttachedToWindow();
             } catch (Throwable t) {
-                XposedLog.w("回放原生球手势失败", t);
-                return false;
-            } finally {
-                view.setHapticFeedbackEnabled(haptic);
-                injecting = false;
+                return true;
             }
         }
 
-        /** 事件投递目标：球控件或 Activity 的分发入口。 */
-        private interface Sink {
-            boolean dispatch(MotionEvent event);
+        private void finishInjection() {
+            if (injectingDownTime == 0) return;
+            injectingDownTime = 0;
+            try {
+                view.setHapticFeedbackEnabled(savedHaptic);
+            } catch (Throwable ignored) {
+            }
         }
 
-        /**
-         * 发一整串 DOWN → MOVE × n → UP。
-         *
-         * <p>DOWN 没人接就补一个 CANCEL 收场：否则后续 MOVE/UP 会冒泡到页面，
-         * 变成一次「点击屏幕显示答案」。
-         *
-         * @param offset 目标在屏幕上的左上角（null 表示坐标本身就是屏幕坐标）
-         * @return DOWN 是否被消费
-         */
-        private boolean sendSequence(Sink sink, float cx, float cy,
-                                     float dx, float dy, int[] offset, long downAt) {
-            int steps = 8;
-            boolean downHandled = false;
-            for (int i = 0; i <= steps + 1; i++) {
-                long at = downAt + i * 16L;
-                float ratio = Math.min(1f, i / (float) steps);
-                float x = cx + dx * ratio;
-                float y = cy + dy * ratio;
-                int action = i == 0 ? MotionEvent.ACTION_DOWN
-                        : (i > steps ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE);
-                MotionEvent event = obtain(downAt, at, action, x, y, offset);
+        /** 打一行「界面到底变没变」，这是判断原生有没有真的预览例句的唯一依据。 */
+        private void logPreview(Target target, String when) {
+            try {
+                Activity activity = Util.findActivity(view.getContext());
+                if (activity == null) return;
+                boolean changed = !target.before.equals(ActionExecutor.visibleTextSignature(activity));
+                XposedLog.i("瞄一眼：" + when + "界面" + (changed ? "已变化" : "无变化"));
+                if (changed) {
+                    XposedLog.i("瞄一眼：" + when + "可见文案=" + ActionExecutor.dumpTexts(activity));
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        private void send(Target target, int action, float x, float y, long at) {
+            MotionEvent event = obtain(target.downAt, at, action, x, y, target.offset);
+            try {
+                target.sink.dispatch(event);
+            } catch (Throwable ignored) {
+            } finally {
+                event.recycle();
+            }
+        }
+
+        /** 一次注入的目标：某一层分发入口 + 它使用的坐标系。 */
+        private final class Target {
+            final Sink sink;
+            final String name;
+            final float x0;
+            final float y0;
+            final float dx;
+            final float dy;
+            final int[] offset;
+            final long downAt;
+            final int screenX;
+            final int screenY;
+            /** 按下之前的可见文案，用来判断「按住期间」到底有没有把例句顶出来。 */
+            final String before;
+
+            Target(Sink sink, String name, float x0, float y0, float dx, float dy,
+                   int[] offset, long downAt) {
+                this.sink = sink;
+                this.name = name;
+                this.x0 = x0;
+                this.y0 = y0;
+                this.dx = dx;
+                this.dy = dy;
+                this.offset = offset;
+                this.downAt = downAt;
+                this.screenX = offset == null ? Math.round(x0) : offset[0] + Math.round(x0);
+                this.screenY = offset == null ? Math.round(y0) : offset[1] + Math.round(y0);
+                this.before = signature();
+            }
+
+            private String signature() {
+                try {
+                    Activity activity = Util.findActivity(view.getContext());
+                    return activity == null ? "" : ActionExecutor.visibleTextSignature(activity);
+                } catch (Throwable t) {
+                    return "";
+                }
+            }
+
+            /**
+             * 发 DOWN。没人接就补 CANCEL 收场——否则后续 MOVE/UP 会冒泡到页面，
+             * 变成一次「点击屏幕显示答案」。
+             */
+            boolean down() {
                 boolean handled = false;
+                MotionEvent event = obtain(downAt, downAt, MotionEvent.ACTION_DOWN, x0, y0, offset);
                 try {
                     handled = sink.dispatch(event);
                 } catch (Throwable ignored) {
                 } finally {
                     event.recycle();
                 }
-                if (i == 0) {
-                    downHandled = handled;
-                    if (!handled) {
-                        MotionEvent cancel = obtain(downAt, at + 16,
-                                MotionEvent.ACTION_CANCEL, x, y, offset);
-                        try {
-                            sink.dispatch(cancel);
-                        } catch (Throwable ignored) {
-                        }
+                if (!handled) {
+                    MotionEvent cancel = obtain(downAt, downAt + 1,
+                            MotionEvent.ACTION_CANCEL, x0, y0, offset);
+                    try {
+                        sink.dispatch(cancel);
+                    } catch (Throwable ignored) {
+                    } finally {
                         cancel.recycle();
-                        return false;
                     }
                 }
+                return handled;
             }
-            return downHandled;
+        }
+
+        /** 事件投递目标：球控件或 Activity 的分发入口。 */
+        private interface Sink {
+            boolean dispatch(MotionEvent event);
         }
 
         /**

@@ -141,34 +141,49 @@ public final class ActionExecutor {
         if (clickPeekControl(activity)) return true;
 
         // ② 主路径：把「左滑」交给原生悬浮球
-        if (!isAnswerShown(activity) && FloatingButtonHook.replayNative(3)) {
-            XposedLog.i("瞄一眼：已把「左滑」交给原生悬浮球");
+        if (!isAnswerShown(activity)) {
+            // 指纹要在按下之前取：官方的「瞄一眼」是按住期间把例句顶出来、
+            // 松手就恢复，所以判断必须落在这段「按住窗口」里，而不是抬手之后。
             final String before = visibleTextSignature(activity);
-            final View decor = activity.getWindow().getDecorView();
+            if (FloatingButtonHook.replayNative(3)) {
+                XposedLog.i("瞄一眼：已按住原生球左滑，1.5 秒后自动松手");
+                final View decor = activity.getWindow().getDecorView();
 
-            // 回放是同步投递、异步生效。300ms 后界面没动静就换下一条路：
-            // 直调墨墨注册给球的官方手势回调（日志实测是 a(int)），
-            // 再不行才补 Ctrl+O。
-            decor.postDelayed(() -> {
-                if (peekChanged(activity, before)) {
-                    XposedLog.i("瞄一眼：左滑回放已生效");
-                    return;
-                }
-                XposedLog.w("瞄一眼：左滑回放后界面无变化，改为直调官方手势回调");
-                if (!FloatingButtonHook.callFloatBtnListener(2)) {
-                    peekFallback(activity, before);
-                    return;
-                }
+                // 回放分帧走：约 160ms 滑到位，然后按住 1.5 秒。
+                // 在按住窗口里查两次，松手后再查一次，都不变才换下一条路。
                 decor.postDelayed(() -> {
-                    if (peekChanged(activity, before)) {
-                        XposedLog.i("瞄一眼：官方手势回调 a(2) 已生效");
+                    if (peekPreviewShown(activity, before)) {
+                        XposedLog.i("瞄一眼：按住期间出现例句，回放生效");
                         return;
                     }
-                    XposedLog.w("瞄一眼：官方手势回调 a(2) 也没有反应");
-                    peekFallback(activity, before);
-                }, 400L);
-            }, 300L);
-            return true;
+                    decor.postDelayed(() -> {
+                        if (peekPreviewShown(activity, before)) {
+                            XposedLog.i("瞄一眼：按住期间出现例句，回放生效");
+                            return;
+                        }
+                        decor.postDelayed(() -> {
+                            if (peekPreviewShown(activity, before)) {
+                                XposedLog.i("瞄一眼：松手后界面有变化，回放生效");
+                                return;
+                            }
+                            XposedLog.w("瞄一眼：左滑按住预览全程无变化，改为直调官方手势回调");
+                            if (!FloatingButtonHook.callFloatBtnListener(2)) {
+                                peekFallback(activity, before);
+                                return;
+                            }
+                            decor.postDelayed(() -> {
+                                if (peekChanged(activity, before)) {
+                                    XposedLog.i("瞄一眼：官方手势回调 a(2) 已生效");
+                                    return;
+                                }
+                                XposedLog.w("瞄一眼：官方手势回调 a(2) 也没有反应");
+                                peekFallback(activity, before);
+                            }, 400L);
+                        }, 1000L);
+                    }, 700L);
+                }, 700L);
+                return true;
+            }
         }
 
         // ③ 兜底：官方快捷键 Ctrl+O
@@ -178,6 +193,21 @@ public final class ActionExecutor {
                     + dumpTexts(activity));
         }
         return ok;
+    }
+
+    /**
+     * 按住预览成功的判据：界面多了文案，而且<b>答案没有被点出来</b>。
+     *
+     * <p>「瞄一眼」只会在单词上方多出一条例句，评分栏不会出现。一旦评分栏出现，
+     * 说明这次注入被页面当成了一次点击，必须立刻判定失败，不能当成功糊过去。
+     */
+    private static boolean peekPreviewShown(Activity activity, String before) {
+        if (!peekChanged(activity, before)) return false;
+        if (isAnswerShown(activity)) {
+            XposedLog.w("瞄一眼：注入被页面当成点击、答案被顶出来了，换路径");
+            return false;
+        }
+        return true;
     }
 
     private static boolean peekChanged(Activity activity, String before) {
@@ -196,7 +226,7 @@ public final class ActionExecutor {
     }
 
     /** 当前可见文案的指纹，用来判断回放后界面到底有没有变化。 */
-    private static String visibleTextSignature(Activity activity) {
+    static String visibleTextSignature(Activity activity) {
         ArrayList<TextView> views = new ArrayList<>();
         collectTextViews(activity.getWindow().getDecorView(), views);
         StringBuilder builder = new StringBuilder();
