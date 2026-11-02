@@ -97,8 +97,8 @@ public final class SettingsPanel {
                 usesFamiliar(config) ? View.VISIBLE : View.GONE);
 
         final TextView peekNotice = notice(activity,
-                "「瞄一眼」交给墨墨自己的悬浮球：模块会模拟「按住球往左滑、停住 1.5 秒再松手」，"
-                        + "对应官方的例句预览效果，不自己画提示层。只在答案出现前可用。");
+                "「瞄一眼」走墨墨官方的按住预览：手指滑到位、还没松手时就把例句顶出来，"
+                        + "一松手立刻恢复。模块不自己画提示层，只在答案出现前可用。");
         final Runnable syncPeek = () -> peekNotice.setVisibility(
                 containsAction(config.before, Config.ACTION_PEEK) ? View.VISIBLE : View.GONE);
 

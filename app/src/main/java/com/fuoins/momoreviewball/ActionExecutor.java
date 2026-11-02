@@ -152,6 +152,12 @@ public final class ActionExecutor {
         //    不模拟触摸、不经过任何 View，效果和手指左滑完全一致。
         if (FloatingButtonHook.callFloatBtnListener(GESTURE_LEFT_CODE)) {
             XposedLog.i("瞄一眼：已把「左滑」交给官方手势回调 a(" + GESTURE_LEFT_CODE + ')');
+            // a(20) 是「进入瞄一眼预览」，只开不关：不补收手码的话例句会一直挂在单词上方。
+            // 官方松手时回调的是 a(-1)，这里照做，1.6 秒后把预览收掉。
+            decor.postDelayed(() -> {
+                FloatingButtonHook.callFloatBtnListener(GESTURE_RELEASE_CODE);
+                XposedLog.i("瞄一眼：预览时间到，已补收手码 a(" + GESTURE_RELEASE_CODE + ')');
+            }, PEEK_HOLD_MS);
             decor.postDelayed(() -> {
                 if (peekPreviewShown(activity, before)) {
                     XposedLog.i("瞄一眼：官方手势回调 a(" + GESTURE_LEFT_CODE + ") 已生效");
@@ -174,6 +180,12 @@ public final class ActionExecutor {
      * 所以 20 就是「左滑」这个手势的码，-1 表示「还在拖动、方向未定」。
      */
     private static final int GESTURE_LEFT_CODE = 20;
+
+    /** 官方松手时回调的码：结束「瞄一眼」预览。 */
+    private static final int GESTURE_RELEASE_CODE = -1;
+
+    /** 直调回调时，例句保持多久再自动收手。 */
+    private static final long PEEK_HOLD_MS = 1600L;
 
     /**
      * 备用路径：把「按住左滑」分帧回放给原生球。
