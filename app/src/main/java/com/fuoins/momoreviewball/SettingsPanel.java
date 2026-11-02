@@ -3,6 +3,7 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -82,17 +83,27 @@ public final class SettingsPanel {
 
         card.addView(divider(activity));
 
+        // 「熟知」不是默认就有的按钮，墨墨要在别处打开才会出现，这里给一条常驻提示，
+        // 只在真的用到了「熟知」时显示。
+        final TextView familiarNotice = notice(activity,
+                "用到了「熟知」：请到 更多设置 → 复习页面 → 工具栏快捷，打开「标识熟知」，"
+                        + "否则球上点不出「熟知」。");
+        final Runnable syncNotice = () -> familiarNotice.setVisibility(
+                usesFamiliar(config) ? View.VISIBLE : View.GONE);
+
         card.addView(sectionTitle(activity, "单词出现前"));
         card.addView(hint(activity, "还没显示答案时生效"));
         for (int i = 0; i < Config.GESTURE_LABELS.length; i++) {
-            card.addView(gestureRow(activity, config, false, i));
+            card.addView(gestureRow(activity, config, false, i, syncNotice));
         }
 
         card.addView(sectionTitle(activity, "单词出现后"));
         card.addView(hint(activity, "出现「认识 / 模糊 / 忘记」评分按钮后生效"));
         for (int i = 0; i < Config.GESTURE_LABELS.length; i++) {
-            card.addView(gestureRow(activity, config, true, i));
+            card.addView(gestureRow(activity, config, true, i, syncNotice));
         }
+        card.addView(familiarNotice);
+        syncNotice.run();
 
         card.addView(sectionTitle(activity, "悬浮球"));
         card.addView(switchRow(activity, "锁定位置（长按也拖不动）", config.locked, checked -> {
@@ -215,8 +226,44 @@ public final class SettingsPanel {
         return tv;
     }
 
+    /** 带浅色底的提示条，比普通灰字更容易被看到。 */
+    private static TextView notice(Activity activity, String text) {
+        TextView tv = new TextView(activity);
+        tv.setText(text);
+        tv.setTextColor(0xFFB26A00);
+        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        tv.setLineSpacing(Util.dp(activity, 2), 1f);
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(0xFFFFF6E8);
+        bg.setCornerRadius(Util.dp(activity, 10));
+        tv.setBackground(bg);
+        int pad = Util.dp(activity, 12);
+        tv.setPadding(pad, pad, pad, pad);
+
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = Util.dp(activity, 14);
+        tv.setLayoutParams(lp);
+        return tv;
+    }
+
+    private static boolean usesFamiliar(Config config) {
+        return containsAction(config.before, Config.ACTION_FAMILIAR)
+                || containsAction(config.after, Config.ACTION_FAMILIAR);
+    }
+
+    private static boolean containsAction(String[] actions, String key) {
+        if (actions == null) return false;
+        for (String action : actions) {
+            if (key.equals(action)) return true;
+        }
+        return false;
+    }
+
     private static View gestureRow(final Activity activity, final Config config,
-                                   final boolean after, final int index) {
+                                   final boolean after, final int index,
+                                   final Runnable onChanged) {
         LinearLayout row = new LinearLayout(activity);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -248,6 +295,7 @@ public final class SettingsPanel {
                 if (TextUtils.equals(target[index], key)) return;
                 target[index] = key;
                 config.save(activity);
+                if (onChanged != null) onChanged.run();
             }
 
             @Override

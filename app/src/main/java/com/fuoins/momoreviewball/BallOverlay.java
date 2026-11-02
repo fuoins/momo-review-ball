@@ -15,6 +15,11 @@ import android.os.Looper;
 import android.view.View;
 import android.view.ViewGroup;
 
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
 
 /**
  * 盖在墨墨自带悬浮球上的一层「球面」。
@@ -44,11 +49,20 @@ final class BallOverlay extends Drawable {
     private static final int BADGE_COLOR = 0xF21F2430;
     private static final int EDGE_COLOR = 0x1A000000;
     private static final int IDLE_COLOR = 0xFFDDE1E6;
+    private static final int NONE_COLOR = 0xFFB9C0CC;
+
+    /** 评分栏还没出现时多久复查一次；配合显隐监听，正常切换几乎是即时的。 */
+    private static final long POLL_MS = 200L;
+
+    private static final List<WeakReference<BallOverlay>> LIVE = new ArrayList<>();
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+    private static volatile boolean sRefreshPending;
 
     private final View host;
     private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF ball = new RectF();
@@ -61,6 +75,9 @@ final class BallOverlay extends Drawable {
     private boolean reportedZero;
     private int highlight = 0;
     private float progress = 0f;
+    private int seenRevision = -1;
+    private int barId;
+    private WeakReference<View> barRef;
 
     private final Runnable clearHighlight = () -> {
         highlight = 0;
@@ -72,12 +89,8 @@ final class BallOverlay extends Drawable {
         @Override
         public void run() {
             if (!running) return;
-            boolean now = detectAfter();
-            if (now != after) {
-                after = now;
-                refresh();
-            }
-            handler.postDelayed(this, 800L);
+            syncAnswerState();
+            handler.postDelayed(this, POLL_MS);
         }
     };
 
@@ -90,11 +103,17 @@ final class BallOverlay extends Drawable {
         basePaint.setColor(BASE_COLOR);
         badgePaint.setStyle(Paint.Style.FILL);
         badgePaint.setColor(BADGE_COLOR);
+        ringPaint.setStyle(Paint.Style.STROKE);
+        ringPaint.setStrokeWidth(Math.max(1f, Util.dp(context, 1.6f)));
+        ringPaint.setColor(0xFFFFFFFF);
         edgePaint.setStyle(Paint.Style.STROKE);
         edgePaint.setStrokeWidth(Math.max(1f, Util.dp(context, 0.7f)));
         edgePaint.setColor(EDGE_COLOR);
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+        synchronized (LIVE) {
+            LIVE.add(new WeakReference<>(this));
+        }
         XposedLog.i("BallOverlay 已创建，host=" + host.getClass().getSimpleName());
     }
 
@@ -102,7 +121,61 @@ final class BallOverlay extends Drawable {
         if (running) return;
         running = true;
         after = detectAfter();
-        handler.postDelayed(tick, 800L);
+        seenRevision = Config.revision();
+        handler.postDelayed(tick, POLL_MS);
+    }
+
+    /**
+     * 任意控件的显隐变化都可能意味着评分栏出现/消失。
+     *
+     * <p>合并成一次延迟刷新，避免一次布局里几十个 setVisibility 把主线程刷爆。
+     */
+    static void requestRefresh() {
+        if (sRefreshPending) return;
+        sRefreshPending = true;
+        MAIN.postDelayed(() -> {
+            sRefreshPending = false;
+            List<BallOverlay> alive = new ArrayList<>();
+            synchronized (LIVE) {
+                for (Iterator<WeakReference<BallOverlay>> it = LIVE.iterator(); it.hasNext(); ) {
+                    BallOverlay overlay = it.next().get();
+                    if (overlay == null) {
+                        it.remove();
+                    } else {
+                        alive.add(overlay);
+                    }
+                }
+            }
+            for (BallOverlay overlay : alive) {
+                overlay.syncAnswerState();
+            }
+        }, 60L);
+    }
+
+    static boolean hasLive() {
+        synchronized (LIVE) {
+            return !LIVE.isEmpty();
+        }
+    }
+
+    /** 执行完一个手势后连续复查几次，评分栏动画一结束就能切到「出现后」。 */
+    void kick() {
+        syncAnswerState();
+        handler.postDelayed(this::syncAnswerState, 90L);
+        handler.postDelayed(this::syncAnswerState, 240L);
+        handler.postDelayed(this::syncAnswerState, 560L);
+    }
+
+    private void syncAnswerState() {
+        if (!running) return;
+        int revision = Config.revision();
+        boolean changed = revision != seenRevision;
+        seenRevision = revision;
+        boolean now = detectAfter();
+        if (now != after || changed) {
+            after = now;
+            refresh();
+        }
     }
 
     /**
@@ -215,18 +288,21 @@ final class BallOverlay extends Drawable {
             canvas.drawArc(band, BAND_ANGLE[i] - sweep / 2f, sweep, false, arcPaint);
         }
 
-        // ③ 中心动作文字：静止时是「单击」的动作，滑动中换成该方向的动作。
-        //    文字放在一个小圆底上，既保证对比度，也顺便把原生球心那点内容盖住。
+        // ③ 中心：静止时是「单击」的动作，滑动中换成该方向的动作。
+        //    底色直接取这个动作在设置页里的配色——认识就是绿、忘记就是红，
+        //    一眼就能看出现在点下去会发生什么；颜色跟着「出现前 / 出现后」一起变。
         int shown = highlight > 0 ? highlight : 0;
         String action = config.actionFor(after, shown);
-        if (Config.ACTION_NONE.equals(action)) return;
-
         String label = shortLabel(action);
         if (label.isEmpty()) return;
 
         float badgeRadius = radius * (highlight > 0 ? 0.44f : 0.40f);
-        badgePaint.setColor(highlight > 0 ? SettingsPanel.colorOf(action) : BADGE_COLOR);
+        badgePaint.setColor(Config.ACTION_NONE.equals(action)
+                ? NONE_COLOR : SettingsPanel.colorOf(action));
         canvas.drawCircle(cx, cy, badgeRadius, badgePaint);
+
+        // 一圈白边，把中心和四周的色带分开，颜色再接近也看得清
+        canvas.drawCircle(cx, cy, badgeRadius - ringPaint.getStrokeWidth() / 2f, ringPaint);
 
         float textSize = label.length() >= 3 ? badgeRadius * 0.56f : badgeRadius * 0.72f;
         textPaint.setTextSize(textSize);
@@ -283,11 +359,19 @@ final class BallOverlay extends Drawable {
     private boolean detectAfter() {
         try {
             Context context = host.getContext();
-            int id = context.getResources()
-                    .getIdentifier("rev_cl_operation_bar", "id", context.getPackageName());
-            if (id == 0) return after;
-            View bar = host.getRootView().findViewById(id);
-            return bar != null && bar.isShown();
+            if (barId == 0) {
+                barId = context.getResources()
+                        .getIdentifier("rev_cl_operation_bar", "id", context.getPackageName());
+            }
+            if (barId == 0) return after;
+            View bar = barRef == null ? null : barRef.get();
+            if (bar == null || !bar.isAttachedToWindow()) {
+                // 只在第一次或页面重建后查一次树，之后每次只是一个 isShown()
+                bar = host.getRootView().findViewById(barId);
+                barRef = new WeakReference<>(bar);
+                if (bar == null) return after;
+            }
+            return bar.isShown();
         } catch (Throwable t) {
             return after;
         }

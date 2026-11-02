@@ -56,6 +56,12 @@ public final class Config {
     public String[] after = DEFAULT_AFTER.clone();
 
     private static volatile Config cached;
+    /** 每次保存 +1，悬浮球据此判断配色/映射是否变了，不用等下一个轮询周期。 */
+    private static volatile int revision = 1;
+
+    public static int revision() {
+        return revision;
+    }
 
     public static Config defaults() {
         return new Config();
@@ -86,6 +92,7 @@ public final class Config {
         } catch (Throwable ignored) {
         }
         cached = this;
+        revision++;
     }
 
     public static void invalidate() {

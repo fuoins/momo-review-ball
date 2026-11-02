@@ -53,6 +53,7 @@ public final class FloatingButtonHook {
 
     private static volatile boolean sClassHooked;
     private static volatile boolean sInflateHooked;
+    private static volatile boolean sVisibilityHooked;
     private static volatile boolean sFound;
 
     private FloatingButtonHook() {
@@ -60,6 +61,7 @@ public final class FloatingButtonHook {
 
     public static void install(ClassLoader classLoader) {
         hookInflate();
+        hookVisibility();
         hookClass(classLoader);
     }
 
@@ -84,6 +86,29 @@ public final class FloatingButtonHook {
             XposedLog.i("已监听布局加载");
         } catch (Throwable t) {
             XposedLog.e("hook inflate 失败", t);
+        }
+    }
+
+    /**
+     * 监听所有控件的显隐。
+     *
+     * <p>「单词出现前 / 出现后」两套配置靠评分栏是否可见来切；之前是 800ms 轮询一次，
+     * 答案出来以后球上的颜色和文字要等大半秒才变，观感就是「切换很慢」。
+     * 评分栏显隐必然走 {@code View.setVisibility}，在这里接一下，命中后立刻重画。
+     */
+    private static void hookVisibility() {
+        if (sVisibilityHooked) return;
+        try {
+            XposedHelpers.findAndHookMethod(View.class, "setVisibility", int.class, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (BallOverlay.hasLive()) BallOverlay.requestRefresh();
+                }
+            });
+            sVisibilityHooked = true;
+            XposedLog.i("已监听控件显隐，答案出现前后即时切换");
+        } catch (Throwable t) {
+            XposedLog.w("hook View.setVisibility 失败，退回轮询", t);
         }
     }
 
@@ -506,11 +531,14 @@ public final class FloatingButtonHook {
             if (Config.ACTION_NONE.equals(action)) {
                 XposedLog.d("gesture=" + Config.GESTURE_LABELS[gestureIndex]
                         + " 已显示答案=" + answerShown + " 动作=未配置");
+                overlay.kick();
                 return;
             }
             boolean ok = ActionExecutor.execute(activity, action, v);
             XposedLog.d("gesture=" + Config.GESTURE_LABELS[gestureIndex]
                     + " 已显示答案=" + answerShown + " 动作=" + action + " 执行=" + ok);
+            // 刚点完/滑完往往就是评分栏出现或消失的时机，多复查几次让球马上换配色
+            overlay.kick();
 
             if (ok) {
                 if (config.haptic) {

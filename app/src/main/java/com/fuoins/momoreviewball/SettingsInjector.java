@@ -2,18 +2,22 @@ package com.fuoins.momoreviewball;
 
 import android.app.Activity;
 import android.graphics.Color;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewParent;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -30,6 +34,8 @@ public final class SettingsInjector {
     private static final String TAG = "momo_ball_settings_entry";
     /** 旧的浮动入口用独立 tag，避免和已经内联的面板互相干扰，也方便注入成功后清掉。 */
     private static final String BTN_TAG = TAG + "_btn";
+    /** 整页滚动容器的 tag，用来判断这一页是不是已经改造过。 */
+    private static final String SCROLL_TAG = TAG + "_scroll";
     private static final int ORANGE = 0xFFF2A33C;
 
     /** 页面是异步铺开的，注入要等；重试这么多次还不行才退回浮动入口。 */
@@ -110,10 +116,23 @@ public final class SettingsInjector {
             return false;
         }
 
-        // 首选：把页面列表搬进同一个滚动容器，模块配置紧接其后，
-        // 整页只有一个滚动区，看起来就是原生设置项的延续
+        // 首选：把整页（标题栏 + 顶部插图 + 原生列表 + 底部「禁用」）搬进同一个 ScrollView，
+        // 模块配置紧接列表之后。这样滚动的是一整页，而不是中间挖出来的一小块列表。
         View panel = SettingsPanel.create(activity);
         panel.setTag(TAG);
+        if (mergeWholePage(activity, root, recycler, panel)) {
+            removeFloatingButton(root);
+            return true;
+        }
+
+        // 整页改造没成功时先给页面几拍时间量出尺寸，别急着退回「只包列表」的旧样子
+        if (attempt < 2) {
+            XposedLog.d("第 " + (attempt + 1) + " 次：整页结构还没量好，稍后重试");
+            return false;
+        }
+
+        // 次选：把页面列表搬进同一个滚动容器，模块配置紧接其后，
+        // 整页只有一个滚动区，看起来就是原生设置项的延续
         if (mergeIntoScroll(activity, root, panel, recycler)) {
             removeFloatingButton(root);
             return true;
@@ -160,6 +179,163 @@ public final class SettingsInjector {
             if (scroll.getChildCount() == 0) return scroll;
         }
         return findVerticalLinear(root);
+    }
+
+    /**
+     * 整页滚动：把页面根布局里的每一块内容按视觉顺序搬进一个 ScrollView。
+     *
+     * <p>墨墨这一页的根是 {@code RelativeLayout}（标题栏 + 内容容器），内容容器里是
+     * 一个 {@code ConstraintLayout}，用绝对定位摆着「顶部插图 / 设置列表 / 底部禁用」。
+     * 之前只把列表包起来，结果标题栏和底部按钮钉死、中间一小块自己滚，看起来很割裂。
+     *
+     * <p>这里沿「列表所在的分支」一路往下拆，遇到分叉就按 {@code getTop()} 排序，
+     * 相邻块的间距取原来的视觉间距（过大的空白——底部按钮原本是贴底对齐的——收敛成常规间距），
+     * 于是整页变成一条连续的竖向内容流：标题栏、插图、原生设置、模块配置、禁用。
+     */
+    private static boolean mergeWholePage(Activity activity, ViewGroup content,
+                                          View recycler, View panel) {
+        if (content == null || content.getChildCount() == 0) return false;
+        if (content.findViewWithTag(SCROLL_TAG) != null) return true;
+
+        ViewGroup pageRoot = null;
+        for (int i = 0; i < content.getChildCount(); i++) {
+            View child = content.getChildAt(i);
+            if (child instanceof ViewGroup && contains((ViewGroup) child, recycler)) {
+                pageRoot = (ViewGroup) child;
+                break;
+            }
+        }
+        if (pageRoot == null) {
+            XposedLog.d("整页滚动：没找到装着列表的根布局");
+            return false;
+        }
+        // 页面本来就有滚动容器：继续走旧路径，别搞成 ScrollView 套 ScrollView
+        if (findScrollView(pageRoot) != null) return false;
+
+        List<View> blocks = new ArrayList<>();
+        if (!collectBlocks(pageRoot, recycler, blocks, 0)) return false;
+        if (!blocks.contains(recycler)) return false;
+
+        int[] rootLoc = new int[2];
+        pageRoot.getLocationInWindow(rootLoc);
+        int pageWidth = pageRoot.getWidth() > 0 ? pageRoot.getWidth() : content.getWidth();
+        if (pageWidth <= 0) return false;
+
+        LinearLayout column = new LinearLayout(activity);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setClipToPadding(false);
+
+        int maxGap = Util.dp(activity, 72);
+        int normalGap = Util.dp(activity, 24);
+        int prevBottom = 0;
+
+        for (View block : blocks) {
+            int[] loc = new int[2];
+            block.getLocationInWindow(loc);
+            int top = loc[1] - rootLoc[1];
+            int bottom = top + block.getHeight();
+            int gap = Math.max(0, top - prevBottom);
+            // 「禁用」原本贴在页面底部，与列表之间是一片空白；搬进内容流后不该保留这一大段
+            if (gap > maxGap) gap = normalGap;
+
+            boolean anchor = block == recycler;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    widthOf(activity, block, pageWidth),
+                    anchor ? ViewGroup.LayoutParams.WRAP_CONTENT : heightOf(activity, block));
+            lp.topMargin = gap;
+            // 宽度不是铺满的块（顶部插图、底部禁用）保持原来的宽度并居中
+            if (lp.width > 0) lp.gravity = Gravity.CENTER_HORIZONTAL;
+
+            ViewParent parent = block.getParent();
+            if (parent instanceof ViewGroup) ((ViewGroup) parent).removeView(block);
+            if (anchor) stopNestedScroll(block);
+            column.addView(block, lp);
+
+            if (anchor) {
+                column.addView(panel, new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            prevBottom = Math.max(prevBottom, bottom);
+        }
+
+        column.setPadding(0, 0, 0, Util.dp(activity, 28));
+
+        ScrollView scroll = new ScrollView(activity);
+        scroll.setTag(SCROLL_TAG);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setClipToPadding(false);
+        Drawable background = pageRoot.getBackground();
+        if (background != null) {
+            // 页面根布局被藏起来后没人画底色了，接到滚动容器上
+            scroll.setBackground(background);
+            pageRoot.setBackground(null);
+        }
+        scroll.addView(column, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        pageRoot.setVisibility(View.GONE);
+        content.addView(scroll, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        XposedLog.i("已改为整页滚动：内容块=" + blocks.size()
+                + "，根布局=" + pageRoot.getClass().getSimpleName() + "，页面宽=" + pageWidth);
+        return true;
+    }
+
+    /**
+     * 沿「列表所在的那个分支」把页面拆成一块块内容，按视觉顺序输出。
+     *
+     * <p>只有装着列表的那条分支会被拆开，其它子 View（标题栏、插图）原样当作一块，
+     * 因此不会动到和滚动无关的东西。
+     */
+    private static boolean collectBlocks(ViewGroup group, View anchor, List<View> out, int depth) {
+        if (depth > 10) return false;
+        int count = group.getChildCount();
+        if (count == 0) return false;
+
+        List<View> kids = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) kids.add(group.getChildAt(i));
+        kids.sort((a, b) -> Integer.compare(a.getTop(), b.getTop()));
+
+        for (View kid : kids) {
+            if (kid instanceof ViewGroup && contains((ViewGroup) kid, anchor)) {
+                if (!collectBlocks((ViewGroup) kid, anchor, out, depth + 1)) out.add(kid);
+            } else {
+                // GONE 的东西不占位置，也别让它进内容流
+                if (kid.getVisibility() == View.GONE) continue;
+                out.add(kid);
+            }
+        }
+        return true;
+    }
+
+    private static boolean contains(ViewGroup group, View view) {
+        ViewParent parent = view.getParent();
+        int guard = 0;
+        while (parent != null && guard++ < 40) {
+            if (parent == group) return true;
+            if (!(parent instanceof View)) return false;
+            parent = ((View) parent).getParent();
+        }
+        return false;
+    }
+
+    private static int widthOf(Activity activity, View block, int pageWidth) {
+        int width = block.getWidth();
+        if (width <= 0 || width >= pageWidth - Util.dp(activity, 8)) {
+            return ViewGroup.LayoutParams.MATCH_PARENT;
+        }
+        return width;
+    }
+
+    private static int heightOf(Activity activity, View block) {
+        int height = block.getHeight();
+        // 特别高的一块多半是靠约束撑满的容器，交给内容自己决定高度
+        if (height <= 0 || height > Util.dp(activity, 420)) {
+            return ViewGroup.LayoutParams.WRAP_CONTENT;
+        }
+        return height;
     }
 
     /**
