@@ -137,7 +137,7 @@ public final class FloatingButtonHook {
         }
         view.setOnTouchListener(handler);
 
-        // 球面标识：给球内部的四向图标染色 + 中心动作文字，纯叠加，不拦截触摸
+        // 球面标识：沿轮廓的四向色带 + 中心动作文字，纯叠加，不拦截触摸
         try {
             view.getOverlay().add(overlay);
             overlay.start();
@@ -145,7 +145,6 @@ public final class FloatingButtonHook {
                 @Override
                 public void onViewAttachedToWindow(View v) {
                     overlay.start();
-                    v.post(overlay::bindIcons);
                 }
 
                 @Override

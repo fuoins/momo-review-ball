@@ -3,7 +3,6 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
-import android.graphics.drawable.GradientDrawable;
 import android.text.TextUtils;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -31,7 +30,6 @@ public final class SettingsPanel {
     private static final int NAVY = 0xFF2F3E6E;
     private static final int TEXT = 0xFF1F2430;
     private static final int SUB = 0xFF8A8F9C;
-    private static final int CARD_BG = 0xFFF6F7FA;
 
     private SettingsPanel() {
     }
@@ -74,24 +72,18 @@ public final class SettingsPanel {
 
         LinearLayout card = new LinearLayout(activity);
         card.setOrientation(LinearLayout.VERTICAL);
-        int pad = Util.dp(activity, 16);
-        card.setPadding(pad, pad, pad, pad);
-
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(CARD_BG);
-        bg.setCornerRadius(Util.dp(activity, 14));
-        card.setBackground(bg);
+        // 左右留白对齐墨墨原生设置项，看起来是同一条列表的延续
+        int padH = Util.dp(activity, 24);
+        card.setPadding(padH, 0, padH, Util.dp(activity, 24));
 
         LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        cardLp.topMargin = Util.dp(activity, 12);
         card.setLayoutParams(cardLp);
 
-        card.addView(bigTitle(activity, "模块手势"));
-        card.addView(hint(activity, "拖动、边界、按压动画都还是墨墨的，这里只改手势对应的动作"));
+        card.addView(divider(activity));
 
         card.addView(sectionTitle(activity, "单词出现前"));
-        card.addView(hint(activity, "还没显示答案、页面提示「请回忆」时生效"));
+        card.addView(hint(activity, "还没显示答案时生效"));
         for (int i = 0; i < Config.GESTURE_LABELS.length; i++) {
             card.addView(gestureRow(activity, config, false, i));
         }
@@ -121,6 +113,10 @@ public final class SettingsPanel {
         reset.setAllCaps(false);
         reset.setTextColor(NAVY);
         reset.setBackgroundColor(Color.TRANSPARENT);
+        LinearLayout.LayoutParams resetLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        resetLp.topMargin = Util.dp(activity, 12);
+        reset.setLayoutParams(resetLp);
         reset.setOnClickListener(v -> {
             config.reset();
             config.save(activity);
@@ -129,6 +125,18 @@ public final class SettingsPanel {
         card.addView(reset);
 
         return card;
+    }
+
+    /** 和上方原生列表之间的一条细线，替代原来的卡片边界。 */
+    private static View divider(Activity activity) {
+        View line = new View(activity);
+        line.setBackgroundColor(0xFFEDEFF3);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, Util.dp(activity, 0.7f)));
+        lp.topMargin = Util.dp(activity, 10);
+        lp.bottomMargin = Util.dp(activity, 2);
+        line.setLayoutParams(lp);
+        return line;
     }
 
     /** 内联失败时的兜底：弹窗显示同一块内容。 */
@@ -153,15 +161,6 @@ public final class SettingsPanel {
         }
     }
 
-    private static TextView bigTitle(Activity activity, String text) {
-        TextView tv = new TextView(activity);
-        tv.setText(text);
-        tv.setTextColor(NAVY);
-        tv.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17);
-        tv.getPaint().setFakeBoldText(true);
-        return tv;
-    }
-
     private static TextView sectionTitle(Activity activity, String text) {
         TextView tv = new TextView(activity);
         tv.setText(text);
@@ -170,7 +169,7 @@ public final class SettingsPanel {
         tv.getPaint().setFakeBoldText(true);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = Util.dp(activity, 18);
+        lp.topMargin = Util.dp(activity, 24);
         lp.bottomMargin = Util.dp(activity, 2);
         tv.setLayoutParams(lp);
         return tv;
@@ -195,7 +194,7 @@ public final class SettingsPanel {
         row.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams rowLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rowLp.topMargin = Util.dp(activity, 6);
+        rowLp.topMargin = Util.dp(activity, 14);
         row.setLayoutParams(rowLp);
 
         TextView label = new TextView(activity);
@@ -238,7 +237,7 @@ public final class SettingsPanel {
         row.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.topMargin = Util.dp(activity, 8);
+        lp.topMargin = Util.dp(activity, 16);
         row.setLayoutParams(lp);
 
         TextView label = new TextView(activity);
