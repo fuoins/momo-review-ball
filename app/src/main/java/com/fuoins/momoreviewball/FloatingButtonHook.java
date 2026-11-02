@@ -771,19 +771,18 @@ public final class FloatingButtonHook {
         private boolean savedHaptic = true;
 
         /**
-         * 正在替用户「按住」原生球的左滑。
+         * 正在替用户「瞄一眼」。
          *
-         * <p>「瞄一眼」是按住预览：手指滑到位、还没离开屏幕时例句才出来，松手即恢复。
+         * <p>「瞄一眼」是按住预览：手指滑到位、还没离开屏幕时例句出现，松手即恢复。
          * 模块的手势要抬手才判定，所以一旦在 MOVE 里认出方向是「瞄一眼」，
-         * 就立刻起一段「DOWN + 滑到位」把按住态做实，等抬手再补 UP。
+         * 就立刻走官方手势回调 a(20) 把例句翻出来，等抬手再补 a(-1) 收起。
          */
-        private boolean previewing;
-        /** 滑到位的那几帧还没发完。 */
-        private boolean previewPending;
-        /** 预览代次：松手时 +1，让排队中的补帧作废。 */
-        private int previewGen;
-        private Target previewTarget;
-        private int previewDir;
+        private boolean peekCalled;
+        /** 本次手势曾经进入过预览：抬手时不再执行别的动作，也不当成点击。 */
+        private boolean peekEverCalled;
+        private int peekDir;
+        /** 本次手势只尝试调一次官方回调，避免回调不可用时每帧重试。 */
+        private boolean peekTried;
         /** 本次手势里「答案是否已出现」只查一次，MOVE 每帧都要用。 */
         private boolean answerShownChecked;
         private boolean answerShownCached;
@@ -820,6 +819,10 @@ public final class FloatingButtonHook {
                     swiping = false;
                     dragging = false;
                     answerShownChecked = false;
+                    peekCalled = false;
+                    peekEverCalled = false;
+                    peekTried = false;
+                    peekDir = 0;
                     downAt = event.getEventTime();
                     downX = event.getRawX();
                     downY = event.getRawY();
@@ -862,16 +865,25 @@ public final class FloatingButtonHook {
                         int dir = direction(dx, dy);
                         overlay.setHighlight(dir, dist / (slop * 4f));
                         // 「瞄一眼」不是抬手动作，而是按住预览：手指滑到位、还没松手时
-                        // 墨墨就把例句顶出来，一松手立刻收回。等 ACTION_UP 再回放的话，
-                        // 用户看到的只会是「松手之后才冒出例句」，而且再没人收手，
-                        // 例句会一直挂在单词上方。所以滑到位就替用户按住。
+                        // 墨墨就把例句顶出来，一松手立刻收回。
+                        //
+                        // 实测（3.1.8 日志）：给原生球喂合成触摸时，按住两秒它只回调
+                        // a(-1)（拖动中），根本没进入左滑预览；抬手的 UP 又被当成普通
+                        // 移动。换句话说「按住不放」这件事靠合成事件做不出来。
+                        //
+                        // 而 a(20) 是官方确认过的「左滑」手势码（3.1.7 抬手调用时例句
+                        // 确实出现）。所以改成：滑动越过阈值的那一刻就调一次 a(20) 把
+                        // 例句翻出来，抬手再调 a(-1) 让官方自己收起——时序正好对上
+                        // 「按住有、松手无」，也不碰任何一条原生触摸链。
                         boolean want = dist > slop * 3f && peekWanted(v, config, dir);
-                        if (want) {
-                            if (!previewing || previewDir != dir) {
-                                endPreview();
-                                startPreview(dir);
-                            }
-                        } else if (previewing) {
+                        boolean keep = dist > slop * 1.8f;
+                        if (want && !peekCalled && !peekTried) {
+                            peekTried = true;
+                            peekCalled = ActionExecutor.beginPeekPreview(v.getContext());
+                            peekDir = dir;
+                            if (peekCalled) peekEverCalled = true;
+                        } else if (peekCalled && !keep) {
+                            // 滑回中心＝取消预览，回差避免在阈值边缘反复开关
                             endPreview();
                         }
                         return Boolean.TRUE;
@@ -882,8 +894,8 @@ public final class FloatingButtonHook {
                 case MotionEvent.ACTION_UP: {
                     if (!tracking) return null;
                     boolean wasDragging = dragging;
-                    boolean wasPreview = previewing || previewPending;
-                    int previewGesture = previewDir;
+                    boolean wasPreview = peekCalled || peekEverCalled;
+                    int previewGesture = peekDir;
                     // 优先用抬手点算位移：快速滑动时 MOVE 采样可能只有一两个，
                     // 只信 lastRaw 会把一次明显的滑动判成点击。
                     float dx = event.getRawX() - downX;
@@ -893,6 +905,7 @@ public final class FloatingButtonHook {
                         dy = lastRawY - downY;
                     }
                     float dist = (float) Math.hypot(dx, dy);
+                    // reset() 里会补 a(-1)，抬手那一刻例句就收起
                     reset();
                     overlay.setHighlight(0, 0f);
 
@@ -902,8 +915,8 @@ public final class FloatingButtonHook {
                     }
 
                     if (wasPreview) {
-                        // 例句是按住期间由原生顶出来的，抬手的 UP 已经在 reset() 里补上，
-                        // 原生自己收回。这里绝不能再执行一次「瞄一眼」——那会重新翻开
+                        // 例句是滑动到位时由官方 a(20) 翻出来的，抬手已经补了 a(-1)，
+                        // 官方自己收回。这里绝不能再执行一次「瞄一眼」——那会重新翻开
                         // 例句，而且没人再收手，就变成「松手之后一直挂着」。
                         XposedLog.d("gesture=" + Config.GESTURE_LABELS[previewGesture]
                                 + " 动作=peek 由按住预览完成");
@@ -1006,103 +1019,15 @@ public final class FloatingButtonHook {
         }
 
         /**
-         * 滑到位的那一刻就替用户按住原生球。
+         * 结束预览：抬手/滑回中心时把官方例句收回去。
          *
-         * <p>只发「DOWN + 滑到位的 MOVE」，<b>故意不发 UP</b>：
-         * 按住期间墨墨自己会把例句顶出来，等用户抬手再由 {@link #endPreview()} 补 UP。
-         * 方向和距离都用原生默认的左滑（出现答案前左滑＝瞄一眼），
-         * 跟用户手指往哪儿滑无关——用户的手指只负责告诉我们「他要瞄一眼」。
-         */
-        private void startPreview(int dir) {
-            int w = view.getWidth();
-            int h = view.getHeight();
-            if (w <= 0 || h <= 0) return;
-
-            // 球径约占控件一半，滑到 46% 明确越过原生激活阈值
-            float dist = Math.min(w, h) * 0.46f;
-            float dx;
-            float dy;
-            switch (dir) {
-                case 1:
-                    dx = 0f;
-                    dy = -dist;
-                    break;
-                case 2:
-                    dx = 0f;
-                    dy = dist;
-                    break;
-                case 3:
-                    dx = -dist;
-                    dy = 0f;
-                    break;
-                case 4:
-                    dx = dist;
-                    dy = 0f;
-                    break;
-                default:
-                    return;
-            }
-
-            long downAt = SystemClock.uptimeMillis();
-            Target target = pickTarget(w, h, dx, dy, downAt);
-            if (target == null) {
-                XposedLog.w("瞄一眼：没有层级接住按下，抬手时改走官方回调");
-                return;
-            }
-
-            savedHaptic = view.isHapticFeedbackEnabled();
-            try {
-                view.setHapticFeedbackEnabled(false);
-            } catch (Throwable ignored) {
-            }
-            injectingDownTime = downAt;
-            previewing = true;
-            previewPending = true;
-            previewTarget = target;
-            previewDir = dir;
-            final int gen = ++previewGen;
-
-            XposedLog.i("瞄一眼：滑到" + dirName(dir) + "就按住，投递=" + target.name
-                    + "，滑距=" + Math.round(dist));
-
-            Handler handler = new Handler(Looper.getMainLooper());
-            for (int i = 1; i <= STEPS; i++) {
-                final int step = i;
-                handler.postDelayed(() -> {
-                    if (gen != previewGen || !attached()) return;
-                    float ratio = step / (float) STEPS;
-                    send(target, MotionEvent.ACTION_MOVE,
-                            target.x0 + target.dx * ratio, target.y0 + target.dy * ratio,
-                            target.downAt + step * MOVE_STEP_MS);
-                }, (long) step * MOVE_STEP_MS);
-            }
-            handler.postDelayed(() -> {
-                if (gen != previewGen) return;
-                previewPending = false;
-                XposedLog.i("瞄一眼：已按住不放，例句此时应已显示，抬手即恢复");
-            }, (long) STEPS * MOVE_STEP_MS + 40L);
-        }
-
-        /**
-         * 结束预览：补发抬手，让原生自己把例句收回去。
-         *
-         * <p>代次先 +1，排队中的补帧立刻作废，所以「滑到一半就松手」
-         * 也不会留下半截手势。
+         * <p>预览是官方回调 a(20) 翻开的，所以收起也必须走官方的 a(-1)，
+         * 让墨墨自己恢复页面，模块不碰任何文案。
          */
         private void endPreview() {
-            if (!previewing && !previewPending) return;
-            previewGen++;
-            Target target = previewTarget;
-            boolean wasHolding = previewing;
-            previewing = false;
-            previewPending = false;
-            previewTarget = null;
-            if (target != null) {
-                send(target, MotionEvent.ACTION_UP,
-                        target.x0 + target.dx, target.y0 + target.dy, SystemClock.uptimeMillis());
-            }
-            finishInjection();
-            if (wasHolding) XposedLog.i("瞄一眼：已松手，原生收起例句");
+            if (!peekCalled) return;
+            peekCalled = false;
+            ActionExecutor.endPeekPreview();
         }
 
         boolean replay(final int dir) {

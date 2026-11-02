@@ -1,6 +1,7 @@
 package com.fuoins.momoreviewball;
 
 import android.app.Activity;
+import android.content.Context;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
@@ -143,33 +144,67 @@ public final class ActionExecutor {
         // 答案已经出来了，瞄一眼没有意义
         if (isAnswerShown(activity)) return sendPeekShortcut(activity);
 
-        final String before = visibleTextSignature(activity);
-        final View decor = activity.getWindow().getDecorView();
-
-        // ② 主路径：官方手势回调。
-        //    手动左滑一次球的日志是「连续 a(-1) + 收手时 a(20)」——-1 是拖动中，
-        //    20 才是「左滑」这个手势的码。直接把它交给墨墨自己的分发，
-        //    不模拟触摸、不经过任何 View，效果和手指左滑完全一致。
-        if (FloatingButtonHook.callFloatBtnListener(GESTURE_LEFT_CODE)) {
-            XposedLog.i("瞄一眼：已把「左滑」交给官方手势回调 a(" + GESTURE_LEFT_CODE + ')');
-            // a(20) 是「进入瞄一眼预览」，只开不关：不补收手码的话例句会一直挂在单词上方。
-            // 官方松手时回调的是 a(-1)，这里照做，1.6 秒后把预览收掉。
+        // ② 主路径：官方手势回调。走到这里说明抬手前没能提前触发
+        //    （比如滑动采样太少），补一段 1.6 秒的临时预览再自动收起。
+        if (beginPeekPreview(activity)) {
+            final View decor = activity.getWindow().getDecorView();
             decor.postDelayed(() -> {
-                FloatingButtonHook.callFloatBtnListener(GESTURE_RELEASE_CODE);
-                XposedLog.i("瞄一眼：预览时间到，已补收手码 a(" + GESTURE_RELEASE_CODE + ')');
+                if (!peekPressing) return;
+                endPeekPreview();
+                XposedLog.i("瞄一眼：临时预览时间到，已收手");
             }, PEEK_HOLD_MS);
-            decor.postDelayed(() -> {
-                if (peekPreviewShown(activity, before)) {
-                    XposedLog.i("瞄一眼：官方手势回调 a(" + GESTURE_LEFT_CODE + ") 已生效");
-                    return;
-                }
-                XposedLog.w("瞄一眼：官方手势回调没有让界面变化，改走触摸回放");
-                replayPeek(activity, before);
-            }, 500L);
             return true;
         }
-        replayPeek(activity, before);
+
+        return sendPeekShortcut(activity);
+    }
+
+    /** 例句预览是否正由模块通过官方回调维持着。 */
+    private static boolean peekPressing;
+
+    /**
+     * 开始「瞄一眼」预览：把官方左滑手势码交给墨墨自己的回调。
+     *
+     * <p>这一步发生在<b>手指还没离开屏幕</b>时，所以例句会在按住期间显示；
+     * 抬手时由 {@link #endPeekPreview()} 补 a(-1)，官方自己收回。
+     * 不合成触摸、不自绘提示层，页面状态完全由墨墨维护。
+     */
+    static boolean beginPeekPreview(Context context) {
+        Activity activity = Util.findActivity(context);
+        if (activity == null) return false;
+        // 答案已经显示时「瞄一眼」没有意义，也不能把评分栏顶掉
+        if (isAnswerShown(activity)) return false;
+        if (peekPressing) endPeekPreview();
+
+        if (!FloatingButtonHook.callFloatBtnListener(GESTURE_LEFT_CODE)) {
+            XposedLog.w("瞄一眼：官方手势回调不可用");
+            return false;
+        }
+        peekPressing = true;
+        XposedLog.i("瞄一眼：滑到位即调官方左滑 a(" + GESTURE_LEFT_CODE + ")，按住期间应显示例句");
+
+        final String before = visibleTextSignature(activity);
+        activity.getWindow().getDecorView().postDelayed(() -> {
+            if (!peekPressing) return;
+            try {
+                if (peekPreviewShown(activity, before)) {
+                    XposedLog.i("瞄一眼：例句已显示（按住中）");
+                } else {
+                    XposedLog.w("瞄一眼：a(" + GESTURE_LEFT_CODE + ") 后界面无变化，可见文案="
+                            + dumpTexts(activity));
+                }
+            } catch (Throwable ignored) {
+            }
+        }, 450L);
         return true;
+    }
+
+    /** 松手：补官方收手码，让墨墨把例句收回去。 */
+    static void endPeekPreview() {
+        if (!peekPressing) return;
+        peekPressing = false;
+        FloatingButtonHook.callFloatBtnListener(GESTURE_RELEASE_CODE);
+        XposedLog.i("瞄一眼：松手补 a(" + GESTURE_RELEASE_CODE + ")，例句收起");
     }
 
     /**
@@ -188,35 +223,6 @@ public final class ActionExecutor {
     private static final long PEEK_HOLD_MS = 1600L;
 
     /**
-     * 备用路径：把「按住左滑」分帧回放给原生球。
-     *
-     * <p>只在官方回调不可用时才走这里。合成触摸终究不是真手指，
-     * 之前实测会被父容器当成拖动，所以优先级排在官方回调之后。
-     */
-    private static void replayPeek(Activity activity, String before) {
-        if (!FloatingButtonHook.replayNative(3)) {
-            peekFallback(activity, before);
-            return;
-        }
-        XposedLog.i("瞄一眼：已按住原生球左滑，约 1 秒后自动松手");
-        final View decor = activity.getWindow().getDecorView();
-        decor.postDelayed(() -> {
-            if (peekPreviewShown(activity, before)) {
-                XposedLog.i("瞄一眼：按住期间出现例句，回放生效");
-                return;
-            }
-            decor.postDelayed(() -> {
-                if (peekPreviewShown(activity, before)) {
-                    XposedLog.i("瞄一眼：松手后界面有变化，回放生效");
-                    return;
-                }
-                XposedLog.w("瞄一眼：触摸回放也没让界面变化");
-                peekFallback(activity, before);
-            }, 1200L);
-        }, 600L);
-    }
-
-    /**
      * 按住预览成功的判据：界面多了文案，而且<b>答案没有被点出来</b>。
      *
      * <p>「瞄一眼」只会在单词上方多出一条例句，评分栏不会出现。一旦评分栏出现，
@@ -226,7 +232,7 @@ public final class ActionExecutor {
         if (!peekChanged(activity, before)) return false;
         XposedLog.i("瞄一眼：界面变化后的可见文案=" + dumpTexts(activity));
         if (isAnswerShown(activity)) {
-            XposedLog.w("瞄一眼：注入被页面当成点击、答案被顶出来了，换路径");
+            XposedLog.w("瞄一眼：页面把预览当成了点击、答案被顶出来了，判为失败");
             return false;
         }
         return true;
@@ -238,13 +244,6 @@ public final class ActionExecutor {
         } catch (Throwable t) {
             return false;
         }
-    }
-
-    private static void peekFallback(Activity activity, String before) {
-        if (sendPeekShortcut(activity)) return;
-        XposedLog.w("瞄一眼：回放 / 官方回调 / Ctrl+O 都没有反应，可见文案="
-                + dumpTexts(activity));
-        toast(activity, "「瞄一眼」没有响应，可在设置页导出日志反馈");
     }
 
     /** 当前可见文案的指纹，用来判断回放后界面到底有没有变化。 */
