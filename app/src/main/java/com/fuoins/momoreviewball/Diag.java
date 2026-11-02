@@ -33,6 +33,8 @@ final class Diag {
     private static final int MAX_NODES = 220;
 
     private static final ArrayDeque<String> LINES = new ArrayDeque<>();
+    /** 每个进程只自动落盘一次，剩下的靠用户点导出。 */
+    private static volatile boolean sFlushed;
     private static final SimpleDateFormat CLOCK =
             new SimpleDateFormat("HH:mm:ss.SSS", Locale.US);
     private static final SimpleDateFormat STAMP =
@@ -141,10 +143,11 @@ final class Diag {
      * 把当前事件日志刷到固定的 latest.txt。
      *
      * <p>设置页注入失败时用户看不到导出按钮，但只要是复习页，这个文件就一直是最新的，
-     * 可以直接从文件管理器取。
+     * 可以直接从文件管理器取。每个进程只写一次，避免每次进复习页都落一次盘。
      */
     static void flush(Context ctx) {
-        if (ctx == null) return;
+        if (ctx == null || sFlushed) return;
+        sFlushed = true;
         try {
             StringBuilder sb = new StringBuilder(8192);
             sb.append("=== MoMoBall 事件日志 ===\n");

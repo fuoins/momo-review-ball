@@ -157,7 +157,7 @@ public final class SettingsPanel {
         // 日志本身不在这里展示，用的时候导出就行
         TextView logHint = new TextView(activity);
         logHint.setText("调试用。日志只在内存里滚动保留最近 600 条，满了自动丢最早的，"
-                + "不会一直变大；导出时才写成文本文件。");
+                + "不会随使用时间一直变大；需要时点上面导出。");
         logHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         logHint.setTextColor(0xFF9AA0AC);
         logHint.setLineSpacing(Util.dp(activity, 2), 1f);
