@@ -1,10 +1,8 @@
 package com.fuoins.momoreviewball;
 
 import android.app.Activity;
-import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
-import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -18,7 +16,9 @@ import org.xmlpull.v1.XmlPullParser;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.WeakHashMap;
 
 import de.robv.android.xposed.XC_MethodHook;
@@ -28,36 +28,31 @@ import de.robv.android.xposed.XposedHelpers;
 /**
  * 接管墨墨自带的复习悬浮球（{@code rev_floating_btn} / MMFloatingButton）。
  *
- * <p>接管方式是「代理」而不是「替换」：
+ * <p>接管方式分两层：
  * <ul>
- *   <li>所有触摸事件默认原样转发给墨墨自己的监听器 / {@code onTouchEvent}，
- *       所以自带的按压动画、拖动跟手、边界吸附、长按拖动全部保持原样；</li>
- *   <li>只有在手指抬起（{@code ACTION_UP}）且这一轮没有走「长按拖动」时，
- *       才拦下这次抬手，按模块配置执行动作，并向原生补发一个
- *       {@code ACTION_CANCEL} 让控件清理按压态——原生因此不会重复执行它自己的手势。</li>
+ *   <li><b>手势</b>：在 {@code dispatchTouchEvent} 最前面判定。原生把「上/下/左/右滑动」
+ *       写在事件分发里，MOVE 一旦被它认为成滑动就直接返回 true、连
+ *       {@code OnTouchListener} 都不再通知，所以只能比它更早一步拿到事件：</li>
+ *   <li><b>球面样式</b>：用控件自己的 {@code foreground} 承载，框架保证在所有子 View
+ *       之后绘制，坐标和尺寸天然跟随球。</li>
  * </ul>
  *
- * <p>定位方式有两路，互为兜底：
- * <ol>
- *   <li>Hook {@code LayoutInflater.inflate}，在返回的视图树里按 id 名找控件——不依赖类名，
- *       加固应用也能命中；</li>
- *   <li>Hook {@code MMFloatingButton} 的构造方法（类能被 classLoader 加载时才生效）。</li>
- * </ol>
+ * <p>事件处理原则：不需要干预的事件原样放行（原生按压动画、长按拖动、边缘吸附全部保留），
+ * 只在自己接管了某个手势时，向原生补发一个 {@code ACTION_CANCEL} 让它清理按压态，
+ * 因此同一个手势不会既走模块又走原生。
  */
 public final class FloatingButtonHook {
 
-    private static final String TAG = "MoMoBall";
     private static final String CLASS_NAME = "com.maimemo.android.momo.ui.widget.button.MMFloatingButton";
     private static final String ID_NAME = "rev_floating_btn";
 
     private static final Map<View, TouchHandler> HOOKED = new WeakHashMap<>();
 
-    /** 每个球实例对应的绘制器，供 draw() hook 取用。 */
-    private static final Map<View, BallOverlay> PAINTERS = new WeakHashMap<>();
+    /** 已经挂过 dispatchTouchEvent 的类，避免重复 hook。 */
+    private static final Set<Class<?>> DISPATCH_HOOKED = new HashSet<>();
 
     private static volatile boolean sClassHooked;
     private static volatile boolean sInflateHooked;
-    private static volatile boolean sDrawHooked;
     private static volatile boolean sFound;
 
     private FloatingButtonHook() {
@@ -133,143 +128,73 @@ public final class FloatingButtonHook {
         }
     }
 
+    // ---------------------------------------------------------------- 事件分发
+
     /**
-     * 在「真正自绘的那个 View」的绘制方法末尾补画球面标识。
+     * 从球控件开始往上找第一个自己重写了 {@code dispatchTouchEvent} 的类并挂上。
      *
-     * <p>实测 {@code MMFloatingButton} 自己既没重写 {@code draw()} 也没重写 {@code onDraw()}，
-     * 它只是个容器，球是里面那个 224×224 的子 View。所以不能死盯球控件本身，
-     * 要顺着树往下找到第一个自己重写了绘制方法的子 View，把画布接在它身上：
-     * 坐标系就是那颗球的坐标系，层级也一定在球的内容之上。
+     * <p>只挂最近的这一个：它如果是 {@code MMFloatingButton} 自己的重写，钩子就在
+     * 原生判定手势之前执行；如果它没重写，那么往上必然是 {@code ViewGroup}，
+     * 钩子同样在原生逻辑之前，只是会经过全局一次（内部用实例表过滤，代价极小）。
      */
-    private static final String[] PAINT_METHODS = {"draw", "dispatchDraw", "onDraw"};
-
-    /** 已经 hook 过的类，避免同一个类被重复挂。 */
-    private static final java.util.Set<Class<?>> HOOKED_CLASSES = new java.util.HashSet<>();
-
-    private static Method pickPaintMethod(Class<?> clazz) {
-        for (String name : PAINT_METHODS) {
-            try {
-                return clazz.getDeclaredMethod(name, Canvas.class);
-            } catch (NoSuchMethodException ignored) {
-            }
-        }
-        return null;
-    }
-
-    /** 从球控件往下找第一个「自己重写了绘制方法、且面积够大」的 View。 */
-    private static View findPaintTarget(View root) {
-        if (pickPaintMethod(root.getClass()) != null) return root;
-        if (!(root instanceof ViewGroup)) return null;
-
-        int minSide = Math.max(1, Math.min(root.getWidth(), root.getHeight()) * 3 / 10);
-        java.util.ArrayDeque<View> queue = new java.util.ArrayDeque<>();
-        ViewGroup group = (ViewGroup) root;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            queue.add(group.getChildAt(i));
-        }
-        int guard = 0;
-        while (!queue.isEmpty() && guard++ < 64) {
-            View v = queue.poll();
-            if (v.getWidth() <= 0 || v.getHeight() <= 0) continue;
-            if (Math.min(v.getWidth(), v.getHeight()) < minSide) continue;
-            if (pickPaintMethod(v.getClass()) != null) return v;
-            if (v instanceof ViewGroup) {
-                ViewGroup vg = (ViewGroup) v;
-                for (int i = 0; i < vg.getChildCount(); i++) {
-                    queue.add(vg.getChildAt(i));
+    private static boolean ensureDispatchHook(Class<?> clazz) {
+        synchronized (DISPATCH_HOOKED) {
+            for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+                Method method = null;
+                try {
+                    method = c.getDeclaredMethod("dispatchTouchEvent", MotionEvent.class);
+                } catch (NoSuchMethodException ignored) {
+                }
+                if (method == null) continue;
+                if (DISPATCH_HOOKED.contains(c)) return true;
+                try {
+                    XposedBridge.hookMethod(method, DISPATCH_CALLBACK);
+                    DISPATCH_HOOKED.add(c);
+                    XposedLog.i("已接管事件分发：" + c.getName() + ".dispatchTouchEvent");
+                    return true;
+                } catch (Throwable t) {
+                    XposedLog.w("hook " + c.getSimpleName() + ".dispatchTouchEvent 失败", t);
                 }
             }
         }
-        return null;
+        return false;
     }
 
-    private static final XC_MethodHook DRAW_CALLBACK = new XC_MethodHook() {
+    private static final XC_MethodHook DISPATCH_CALLBACK = new XC_MethodHook() {
         @Override
-        protected void afterHookedMethod(MethodHookParam param) {
+        protected void beforeHookedMethod(MethodHookParam param) {
             if (!(param.thisObject instanceof View)) return;
+            if (HOOKED.isEmpty()) return;
             View view = (View) param.thisObject;
-            BallOverlay painter;
-            synchronized (PAINTERS) {
-                painter = PAINTERS.get(view);
+            TouchHandler handler;
+            synchronized (HOOKED) {
+                handler = HOOKED.get(view);
             }
-            if (painter == null) return;
-            if (!(param.args[0] instanceof Canvas)) return;
-            int w = view.getWidth();
-            int h = view.getHeight();
-            if (w <= 0 || h <= 0) return;
-            try {
-                painter.setBounds(0, 0, w, h);
-                Canvas canvas = (Canvas) param.args[0];
-                int save = canvas.save();
-                painter.draw(canvas);
-                canvas.restoreToCount(save);
-            } catch (Throwable ignored) {
+            if (handler == null) return;
+            if (!(param.args[0] instanceof MotionEvent)) return;
+            Boolean handled = handler.onDispatch(view, (MotionEvent) param.args[0]);
+            if (handled != null) {
+                param.setResult(handled);
             }
         }
     };
 
-    /** @return true 表示已经找到并挂上绘制挂点。 */
-    private static boolean tryHookPaint(View ball, BallOverlay painter) {
-        try {
-            View target = findPaintTarget(ball);
-            if (target == null) return false;
-            Class<?> clazz = target.getClass();
-            Method method = pickPaintMethod(clazz);
-            if (method == null) return false;
-
-            synchronized (PAINTERS) {
-                PAINTERS.put(target, painter);
-            }
-            painter.setPaintHost(target);
-
-            synchronized (HOOKED_CLASSES) {
-                if (!HOOKED_CLASSES.contains(clazz)) {
-                    XposedBridge.hookMethod(method, DRAW_CALLBACK);
-                    HOOKED_CLASSES.add(clazz);
-                }
-            }
-            if (!sDrawHooked) {
-                sDrawHooked = true;
-                XposedLog.i("球面绘制挂点=" + clazz.getSimpleName() + "." + method.getName()
-                        + "，尺寸=" + target.getWidth() + "x" + target.getHeight());
-            } else {
-                XposedLog.i("新球实例已绑定绘制挂点 " + clazz.getSimpleName()
-                        + "，尺寸=" + target.getWidth() + "x" + target.getHeight());
-            }
-            return true;
-        } catch (Throwable t) {
-            XposedLog.w("挂绘制点失败", t);
-            return false;
-        }
-    }
+    // ---------------------------------------------------------------- 装配
 
     static void attach(final View view) {
-        final View.OnTouchListener original;
         final TouchHandler handler;
         final BallOverlay overlay;
         synchronized (HOOKED) {
             if (HOOKED.containsKey(view)) return;
-            original = readTouchListener(view);
             overlay = new BallOverlay(view);
-            handler = new TouchHandler(view, original, overlay);
+            handler = new TouchHandler(view, readTouchListener(view), overlay);
             HOOKED.put(view, handler);
-            synchronized (PAINTERS) {
-                PAINTERS.put(view, overlay);
-            }
         }
-        view.setOnTouchListener(handler);
 
-        // 球面标识：沿轮廓的四向色带 + 中心动作文字。
-        // 首选「在球自己的 draw() 之后补画」——坐标系天然正确、层级一定在最上；
-        // 类没重写 draw/onDraw 时才退回父容器里的覆盖 View，再不行退回 ViewOverlay。
-        // 球面标识：沿轮廓的四向色带 + 中心动作文字。
-        //
-        // 这里改用控件自己的 foreground 承载，而不是 overlay / 兄弟 View / 绘制 hook：
+        // 球面样式：用控件自己的 foreground 承载。
         //   · 框架保证 foreground 在 dispatchDraw 之后画，一定盖在球体所有内容上面；
         //   · bounds 由控件在 onSizeChanged 里设置，尺寸天然跟随（448 还是 582 都对）；
-        //   · 按压缩放、拖动位移都作用在同一个控件上，不需要任何坐标同步；
-        //   · setForeground 会自动把 drawable 的 callback 指向控件，
-        //     invalidateSelf() 就能直接触发重绘。
+        //   · 按压缩放、拖动位移都作用在同一个控件上，不需要任何坐标同步。
         try {
             Drawable old = null;
             try {
@@ -303,10 +228,16 @@ public final class FloatingButtonHook {
             attachOverlay(view, overlay);
         }
 
-        sFound = true;
-        XposedLog.i("已代理自带悬浮球，原有 listener=" + original);
+        // 手势必须在 dispatchTouchEvent 这一层接管：原生在分发阶段就把滑动吞了
+        if (!ensureDispatchHook(view.getClass())) {
+            view.setOnTouchListener(handler);
+            XposedLog.w("事件分发接管失败，退回 OnTouchListener，原生滑动可能仍然优先");
+        }
 
-        // 球体几何诊断：控件本身不是正方形，真实球的区域靠这段日志确认
+        sFound = true;
+        XposedLog.i("已代理自带悬浮球，原有 listener=" + handler.original);
+
+        // 球体几何诊断：控件本身比球大一倍，真实球的区域靠这段日志确认
         view.post(() -> {
             StringBuilder sb = new StringBuilder("球控件尺寸 ");
             sb.append(view.getWidth()).append('x').append(view.getHeight());
@@ -330,7 +261,7 @@ public final class FloatingButtonHook {
         view.postDelayed(() -> Diag.flush(view.getContext()), 1500L);
     }
 
-    /** 兜底：父容器不可用时退回 ViewOverlay，尺寸每次绘制前强制对齐控件。 */
+    /** 兜底：foreground 不可用时退回 ViewOverlay，尺寸每次绘制前强制对齐控件。 */
     private static void attachOverlay(final View view, final BallOverlay overlay) {
         try {
             view.getOverlay().add(overlay);
@@ -369,7 +300,14 @@ public final class FloatingButtonHook {
         }
     }
 
-    /** 代理自带悬浮球的触摸：默认全转发，只在抬手时接管手势判定。 */
+    // ---------------------------------------------------------------- 手势
+
+    /**
+     * 球的手势判定。
+     *
+     * <p>{@link #onDispatch} 返回 {@code null} 表示「不干预，原样交给墨墨」，
+     * 返回 {@code true} 表示「这个事件模块吃掉了」。
+     */
     static final class TouchHandler implements View.OnTouchListener {
 
         private final View view;
@@ -379,7 +317,11 @@ public final class FloatingButtonHook {
         private final int longPressTimeout;
 
         private boolean tracking;
+        private boolean swiping;
         private boolean dragging;
+        /** 正在给原生补发 CANCEL，这一趟的分发要原样放行。 */
+        private boolean injecting;
+
         private long downAt;
         private float downX;
         private float downY;
@@ -395,18 +337,21 @@ public final class FloatingButtonHook {
             this.longPressTimeout = ViewConfiguration.getLongPressTimeout();
         }
 
-        @Override
-        public boolean onTouch(View v, MotionEvent event) {
+        Boolean onDispatch(View v, MotionEvent event) {
+            if (injecting) return null;
+
             Config config = Config.get(v.getContext());
             if (!config.enabled) {
-                return forward(v, event);
+                if (tracking) reset();
+                return null;
             }
 
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
                     tracking = true;
+                    swiping = false;
                     dragging = false;
-                    downAt = SystemClock.uptimeMillis();
+                    downAt = event.getEventTime();
                     downX = event.getRawX();
                     downY = event.getRawY();
                     lastRawX = downX;
@@ -416,44 +361,43 @@ public final class FloatingButtonHook {
                     // 按下期间先把这个权利拿过来，抬手再还回去。
                     disallowParentIntercept(v, true);
                     // 锁定位置时连按下都不给原生，否则它会播长按拖动的反馈动画
-                    if (config.locked) return true;
-                    return forward(v, event);
+                    return config.locked ? Boolean.TRUE : null;
 
                 case MotionEvent.ACTION_MOVE: {
-                    if (!tracking) return forward(v, event);
+                    if (!tracking) return null;
                     lastRawX = event.getRawX();
                     lastRawY = event.getRawY();
                     float dx = lastRawX - downX;
                     float dy = lastRawY - downY;
                     float dist = (float) Math.hypot(dx, dy);
 
-                    // 按住超过长按阈值后才开始移动 = 墨墨自己的「长按拖动」
-                    // 位置、边界、吸附全部交还原生，模块不参与，避免把球拖出屏幕
-                    if (!dragging && !config.locked
-                            && SystemClock.uptimeMillis() - downAt >= longPressTimeout
-                            && dist > slop) {
-                        dragging = true;
+                    if (!swiping && !dragging && dist > slop) {
+                        long held = event.getEventTime() - downAt;
+                        if (!config.locked && held >= longPressTimeout) {
+                            // 按住超过长按阈值才移动 = 墨墨自己的「长按拖动」，
+                            // 位置、边界、吸附全部交还原生
+                            dragging = true;
+                        } else {
+                            // 早期移动 = 模块手势。先给原生补一个 CANCEL 收掉
+                            // 它已经开始的按压态，否则它会一边播动画一边等自己的 UP
+                            swiping = true;
+                            sendCancel(v, event);
+                        }
                     }
 
                     if (dragging) {
                         overlay.setHighlight(0, 0f);
-                        return forward(v, event);
+                        return null;
                     }
-
-                    // 模块自己的手势动画：滑动中高亮对应方向，并显示该方向将要执行的动作
-                    if (dist > slop * 0.7f) {
+                    if (swiping) {
                         overlay.setHighlight(direction(dx, dy), dist / (slop * 4f));
+                        return Boolean.TRUE;
                     }
-
-                    // 直接吞掉，不转发也不钉坐标。
-                    // 转发会被原生抢先判定手势（时好时坏）；钉坐标会让原生 onTouchEvent
-                    // 认为没有位移而返回 false，触摸序列被父容器取消，抬手事件收不到，
-                    // 于是只剩点击能用。吞掉则自己保证序列连续，原生完全不知道手指动过。
-                    return true;
+                    return null;
                 }
 
                 case MotionEvent.ACTION_UP: {
-                    if (!tracking) return forward(v, event);
+                    if (!tracking) return null;
                     boolean wasDragging = dragging;
                     // 优先用抬手点算位移：快速滑动时 MOVE 采样可能只有一两个，
                     // 只信 lastRaw 会把一次明显的滑动判成点击。
@@ -463,36 +407,44 @@ public final class FloatingButtonHook {
                         dx = lastRawX - downX;
                         dy = lastRawY - downY;
                     }
+                    float dist = (float) Math.hypot(dx, dy);
                     reset();
                     overlay.setHighlight(0, 0f);
 
                     if (wasDragging) {
                         // 拖动结束，抬手交给原生做边缘吸附
-                        return forward(v, event);
+                        return null;
                     }
 
                     // 拦下这次抬手：先给原生补一个 CANCEL 清理按压态，原生动作就不会触发
-                    if (!config.locked) cancelNative(v, event);
-                    float dist = (float) Math.hypot(dx, dy);
+                    sendCancel(v, event);
                     if (dist <= slop * 1.2f) {
                         runAction(v, 0, config);
                     } else {
                         runAction(v, direction(dx, dy), config);
                     }
-                    return true;
+                    return Boolean.TRUE;
                 }
 
                 case MotionEvent.ACTION_CANCEL:
                     reset();
                     overlay.setHighlight(0, 0f);
-                    return forward(v, event);
+                    return null;
 
                 default:
-                    return forward(v, event);
+                    return null;
             }
         }
 
-        /** 原样交给墨墨：有原生 listener 就走它，没有则返回 false 让 View.onTouchEvent 处理。 */
+        /** OnTouchListener 兜底路径（只在事件分发 hook 装不上时使用）。 */
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            Boolean handled = onDispatch(v, event);
+            if (handled != null) return handled;
+            return forward(v, event);
+        }
+
+        /** 原样交给墨墨：有原生 listener 就走它。 */
         private boolean forward(View v, MotionEvent event) {
             if (original != null) {
                 try {
@@ -503,22 +455,30 @@ public final class FloatingButtonHook {
             return false;
         }
 
-        /** 给原生补发 CANCEL，清掉按下态 / 正在播放的按压动画，同时通知它手势结束。 */
-        private void cancelNative(View v, MotionEvent event) {
+        /**
+         * 给原生补发一个 CANCEL，清掉按下态 / 按压动画 / 未完成的拖动。
+         *
+         * <p>直接调 {@code dispatchTouchEvent}：原生把逻辑写在分发里，
+         * 调 {@code onTouchEvent} 不一定能清干净。重入由 {@link #injecting} 放行。
+         */
+        private void sendCancel(View v, MotionEvent event) {
+            if (injecting) return;
+            injecting = true;
             MotionEvent cancel = null;
             try {
                 cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
-                if (original != null) original.onTouch(v, cancel);
-                v.onTouchEvent(cancel);
+                v.dispatchTouchEvent(cancel);
             } catch (Throwable ignored) {
             } finally {
+                injecting = false;
                 if (cancel != null) cancel.recycle();
             }
         }
 
         private void reset() {
             tracking = false;
+            swiping = false;
             dragging = false;
             disallowParentIntercept(view, false);
         }

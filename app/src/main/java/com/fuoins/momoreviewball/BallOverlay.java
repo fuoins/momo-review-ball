@@ -17,14 +17,18 @@ import android.view.ViewGroup;
 
 
 /**
- * 盖在墨墨自带悬浮球上的一层标识。
+ * 盖在墨墨自带悬浮球上的一层「球面」。
  *
- * <ul>
- *   <li>中心小字：显示「单击」当前对应的动作，随「单词出现前 / 出现后」切换；</li>
- *   <li>滑动时：对应方向的弧线加粗高亮、中心文字立刻变成该方向将执行的动作，
- *       抬手后淡出——这是模块自己的手势动画，不依赖原生、也不会触发原生动作；</li>
- *   <li>边缘四向色带：沿球体轮廓画四段彩色弧，颜色跟着当前映射动作走。</li>
- * </ul>
+ * <p>绘制顺序刻意做成「先铺底、再画内容」：
+ * <ol>
+ *   <li>先用不透明底色画满整颗球，把原生球面上的方向图标、方向色环整个盖掉——
+ *       之前只画四条细弧，原生的东西从弧线内外两头露出来，看起来就是「没盖住」；</li>
+ *   <li>再沿球内壁画四段粗色带，颜色跟着「上/下/左/右」当前映射的动作走；</li>
+ *   <li>最后在正中间写「单击」当前对应的动作，滑动时换成该方向将执行的动作。</li>
+ * </ol>
+ *
+ * <p>几何一律以「控件里那颗真正的球」为准（{@code xj6} 224×224，居中），
+ * 而不是控件的整个矩形——控件比球大一倍，按控件画会整整偏出一圈。
  */
 final class BallOverlay extends Drawable {
 
@@ -32,14 +36,22 @@ final class BallOverlay extends Drawable {
             "无", "认识", "模糊", "忘记", "熟知", "发音", "显示", "瞄一眼", "返回"
     };
 
-    /** 上 / 下 / 左 / 右 四段弧的起始角（0° 在 3 点钟方向，顺时针）。 */
-    private static final int[] ARC_START = {242, 62, 152, -28};
+    /** 上 / 下 / 左 / 右 四条色带的中心角（0° 在 3 点钟方向，顺时针）。 */
+    private static final float[] BAND_ANGLE = {270f, 90f, 180f, 0f};
 
-    private View host;
+    /** 球面底色：盖住原生内容，同时保持球是浅色的，和墨墨整体风格一致。 */
+    private static final int BASE_COLOR = 0xFFF7F8FA;
+    private static final int TEXT_COLOR = 0xFF1F2430;
+    private static final int EDGE_COLOR = 0x1A000000;
+    private static final int IDLE_COLOR = 0xFFDDE1E6;
+
+    private final View host;
     private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RectF oval = new RectF();
+    private final RectF ball = new RectF();
+    private final RectF band = new RectF();
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private boolean after;
@@ -72,19 +84,15 @@ final class BallOverlay extends Drawable {
         this.host = host;
         Context context = host.getContext();
         arcPaint.setStyle(Paint.Style.STROKE);
-        arcPaint.setStrokeCap(Paint.Cap.ROUND);
-        arcPaint.setStrokeWidth(Util.dp(context, 2.4f));
-        textPaint.setColor(Color.WHITE);
+        arcPaint.setStrokeCap(Paint.Cap.BUTT);
+        basePaint.setStyle(Paint.Style.FILL);
+        basePaint.setColor(BASE_COLOR);
+        edgePaint.setStyle(Paint.Style.STROKE);
+        edgePaint.setStrokeWidth(Math.max(1f, Util.dp(context, 0.7f)));
+        edgePaint.setColor(EDGE_COLOR);
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setTypeface(Typeface.DEFAULT_BOLD);
-        badgePaint.setColor(0xC4141B2E);
-        badgePaint.setStyle(Paint.Style.FILL);
         XposedLog.i("BallOverlay 已创建，host=" + host.getClass().getSimpleName());
-    }
-
-    /** 绘制挂点换到真正自绘的那个子 View 上时，宽高也要跟着换。 */
-    void setPaintHost(View target) {
-        if (target != null) this.host = target;
     }
 
     void start() {
@@ -97,8 +105,8 @@ final class BallOverlay extends Drawable {
     /**
      * 重绘请求。
      *
-     * <p>直接用 drawable 时 {@code invalidateSelf()} 靠 callback 冒泡到控件，
-     * 但这里没有走 {@code getOverlay().add()}，callback 是空的，必须自己叫醒控件。
+     * <p>{@code invalidateSelf()} 靠 callback 冒泡到控件；foreground 模式下 callback
+     * 指向控件，但换过承载方式时不一定可靠，顺手再叫一次控件重绘。
      */
     private void refresh() {
         invalidateSelf();
@@ -128,7 +136,7 @@ final class BallOverlay extends Drawable {
     @Override
     public void draw(Canvas canvas) {
         // overlay 模式下 bounds 常常和控件对不上（实测 582 vs 控件 448），
-        // 画出来的弧整个落到球外面，所以每次绘制都按控件实际尺寸强制对齐。
+        // 所以每次绘制都按控件实际尺寸强制对齐。
         int hostW = host.getWidth();
         int hostH = host.getHeight();
         Rect b = getBounds();
@@ -147,64 +155,71 @@ final class BallOverlay extends Drawable {
         Config config = Config.get(host.getContext());
         if (!config.enabled) return;
 
+        Context context = host.getContext();
+
+        // 球体区域：控件本身比球大一圈（448 的容器里那颗球只有 224），
+        // 按控件画一定偏，必须以球自己那个子 View 为准。
+        if (!childBallRect(ball)) {
+            float side = Math.min(b.width(), b.height());
+            float left = b.exactCenterX() - side / 2f;
+            float top = b.exactCenterY() - side / 2f;
+            ball.set(left, top, left + side, top + side);
+        }
+        float radius = Math.min(ball.width(), ball.height()) / 2f;
+        if (radius < Util.dp(context, 8f)) return;
+
+        // 球体自己可能带阴影，往外留一点点，别把球撑大
+        ball.inset(radius * 0.02f, radius * 0.02f);
+        radius = Math.min(ball.width(), ball.height()) / 2f;
+        float cx = ball.centerX();
+        float cy = ball.centerY();
+
         if (!reported) {
             reported = true;
             Rect clip = new Rect();
             canvas.getClipBounds(clip);
-            XposedLog.i("球面标识开始绘制 " + b.width() + "x" + b.height()
-                    + "，子View=" + (host instanceof ViewGroup
-                            ? ((ViewGroup) host).getChildCount() : -1)
-                    + "，裁剪区=" + clip.width() + "x" + clip.height());
+            XposedLog.i("球面标识开始绘制 控件=" + b.width() + "x" + b.height()
+                    + " 球=" + Math.round(radius * 2) + " 圆心=(" + Math.round(cx)
+                    + "," + Math.round(cy) + ") 裁剪区=" + clip.width() + "x" + clip.height());
         }
 
-        Context context = host.getContext();
+        // ① 不透明底盘：把原生的方向图标、方向色环整个盖掉
+        basePaint.setColor(BASE_COLOR);
+        basePaint.setAlpha(255);
+        canvas.drawCircle(cx, cy, radius, basePaint);
+        canvas.drawCircle(cx, cy, radius - edgePaint.getStrokeWidth() / 2f, edgePaint);
 
-        // 墨墨的球控件本身不是正方形（5.6 上是 493×582），整个矩形当球画会变成椭圆、
-        // 上下两端飘到球外。优先取控件内部那个接近正方形、面积最大的子 View 当球体；
-        // 取不到就退回「以控件中心为圆心、边长取短边」的正方形。
-        float inset = Util.dp(context, 4.0f);
-        oval.set(b.left, b.top, b.right, b.bottom);
-        if (!childBallRect(oval)) {
-            float side = Math.min(b.width(), b.height());
-            float left = b.exactCenterX() - side / 2f;
-            float top = b.exactCenterY() - side / 2f;
-            oval.set(left, top, left + side, top + side);
-        }
-        oval.inset(inset, inset);
-
-        float cx = oval.centerX();
-        float cy = oval.centerY();
-        float radius = Math.min(oval.width(), oval.height()) / 2f;
+        // ② 四段粗色带：贴着球内壁，位置正好压住原生那圈方向色
+        float bandWidth = radius * 0.30f;
+        float bandRadius = radius - bandWidth / 2f - radius * 0.03f;
+        band.set(cx - bandRadius, cy - bandRadius, cx + bandRadius, cy + bandRadius);
+        arcPaint.setStrokeWidth(bandWidth);
 
         for (int i = 0; i < 4; i++) {
             int gesture = i + 1;
             String action = config.actionFor(after, gesture);
-            if (Config.ACTION_NONE.equals(action)) continue;
-
+            boolean idle = Config.ACTION_NONE.equals(action);
             boolean active = highlight == gesture && progress > 0f;
             boolean dim = highlight != 0 && !active;
 
-            arcPaint.setColor(SettingsPanel.colorOf(action));
-            arcPaint.setAlpha(dim ? 70 : (active ? 255 : 235));
-            arcPaint.setStrokeWidth(Util.dp(context, active ? 7.0f : 5.0f));
+            arcPaint.setColor(idle ? IDLE_COLOR : SettingsPanel.colorOf(action));
+            arcPaint.setAlpha(dim ? 96 : 255);
 
-            float sweep = active ? 46f + 30f * progress : 58f;
-            canvas.drawArc(oval, ARC_START[i], sweep, false, arcPaint);
+            float sweep = active ? 74f + 24f * progress : 68f;
+            canvas.drawArc(band, BAND_ANGLE[i] - sweep / 2f, sweep, false, arcPaint);
         }
 
-        // 滑动中显示该方向的动作，静止时显示单击的动作
+        // ③ 中心动作文字：静止时是「单击」的动作，滑动中换成该方向的动作
         int shown = highlight > 0 ? highlight : 0;
         String action = config.actionFor(after, shown);
         if (Config.ACTION_NONE.equals(action)) return;
 
-        float badgeRadius = radius * (highlight > 0 ? 0.40f : 0.34f);
-        badgePaint.setColor(highlight > 0 ? 0xE6102340 : 0xC4141B2E);
-        canvas.drawCircle(cx, cy, badgeRadius, badgePaint);
-
         String label = shortLabel(action);
-        float textSize = label.length() >= 3 ? badgeRadius * 0.62f : badgeRadius * 0.82f;
+        if (label.isEmpty()) return;
+
+        float textSize = label.length() >= 3 ? radius * 0.30f : radius * 0.38f;
         textPaint.setTextSize(textSize);
-        textPaint.setColor(Color.WHITE);
+        textPaint.setColor(highlight > 0 ? SettingsPanel.colorOf(action) : TEXT_COLOR);
 
         Paint.FontMetrics fm = textPaint.getFontMetrics();
         float baseline = cy - (fm.ascent + fm.descent) / 2f;
@@ -214,7 +229,7 @@ final class BallOverlay extends Drawable {
     /**
      * 在控件内部找真正的那颗球：可见、宽高接近、面积最大的子 View。
      *
-     * <p>墨墨把球画在一个比球本身高出一截的容器里（多出来的部分通常是阴影或拖拽热区），
+     * <p>墨墨把球画在一个比球本身大一倍的容器里（多出来的部分是阴影和拖拽热区），
      * 直接按容器画圆一定会偏，所以有子 View 就以子 View 为准。
      *
      * @return true 表示找到了并把坐标写进 out（坐标系与 Drawable bounds 一致）
