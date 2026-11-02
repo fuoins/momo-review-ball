@@ -35,7 +35,7 @@ final class BallOverlay extends Drawable {
     /** 上 / 下 / 左 / 右 四段弧的起始角（0° 在 3 点钟方向，顺时针）。 */
     private static final int[] ARC_START = {242, 62, 152, -28};
 
-    private final View host;
+    private View host;
     private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -80,6 +80,11 @@ final class BallOverlay extends Drawable {
         badgePaint.setColor(0xC4141B2E);
         badgePaint.setStyle(Paint.Style.FILL);
         XposedLog.i("BallOverlay 已创建，host=" + host.getClass().getSimpleName());
+    }
+
+    /** 绘制挂点换到真正自绘的那个子 View 上时，宽高也要跟着换。 */
+    void setPaintHost(View target) {
+        if (target != null) this.host = target;
     }
 
     void start() {

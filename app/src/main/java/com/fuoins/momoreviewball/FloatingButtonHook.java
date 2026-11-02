@@ -125,75 +125,118 @@ public final class FloatingButtonHook {
             }
             sClassHooked = true;
             XposedLog.i("已 hook " + CLASS_NAME + " 构造");
-            hookDraw(clazz);
         } catch (Throwable t) {
             XposedLog.e("hook 悬浮球类失败", t);
         }
     }
 
     /**
-     * 在球控件自己的 {@code draw()} 之后补画球面标识。
+     * 在「真正自绘的那个 View」的绘制方法末尾补画球面标识。
      *
-     * <p>这是唯一不用猜坐标的方案：canvas 就是球的 canvas，原点永远是球的左上角，
-     * 层级也一定在球的所有内容之上。之前的 ViewOverlay 报的是 582×582、
-     * 而控件只有 448×448；换成兄弟 View 又被父容器摆回 (0,0) 不跟手——
-     * 两种方案都在跟坐标系打架，直接画在球身上就没这问题。
+     * <p>实测 {@code MMFloatingButton} 自己既没重写 {@code draw()} 也没重写 {@code onDraw()}，
+     * 它只是个容器，球是里面那个 224×224 的子 View。所以不能死盯球控件本身，
+     * 要顺着树往下找到第一个自己重写了绘制方法的子 View，把画布接在它身上：
+     * 坐标系就是那颗球的坐标系，层级也一定在球的内容之上。
      */
-    private static void hookDraw(Class<?> clazz) {
-        Method target = null;
-        String name = null;
-        try {
-            target = clazz.getDeclaredMethod("draw", Canvas.class);
-            name = "draw";
-        } catch (NoSuchMethodException ignored) {
-        }
-        if (target == null) {
+    private static final String[] PAINT_METHODS = {"draw", "dispatchDraw", "onDraw"};
+
+    /** 已经 hook 过的类，避免同一个类被重复挂。 */
+    private static final java.util.Set<Class<?>> HOOKED_CLASSES = new java.util.HashSet<>();
+
+    private static Method pickPaintMethod(Class<?> clazz) {
+        for (String name : PAINT_METHODS) {
             try {
-                target = clazz.getDeclaredMethod("onDraw", Canvas.class);
-                name = "onDraw";
+                return clazz.getDeclaredMethod(name, Canvas.class);
             } catch (NoSuchMethodException ignored) {
             }
         }
-        if (target == null) {
-            XposedLog.w("浮球没有重写 draw/onDraw，改用覆盖层绘制");
-            return;
-        }
-        // 只有 draw() 的末尾才是「全部内容画完」。onDraw() 之后还有 dispatchDraw
-        // 会把子 View 盖上来，色带会被球体自己挡住，所以那种情况仍走覆盖层。
-        if (!"draw".equals(name)) {
-            XposedLog.w("浮球只重写了 onDraw，绘制 hook 会被子 View 覆盖，改用覆盖层");
-            return;
-        }
+        return null;
+    }
 
-        try {
-            XposedBridge.hookMethod(target, new XC_MethodHook() {
-                @Override
-                protected void afterHookedMethod(MethodHookParam param) {
-                    if (!(param.thisObject instanceof View)) return;
-                    View view = (View) param.thisObject;
-                    BallOverlay painter;
-                    synchronized (PAINTERS) {
-                        painter = PAINTERS.get(view);
-                    }
-                    if (painter == null) return;
-                    if (!(param.args[0] instanceof Canvas)) return;
-                    int w = view.getWidth();
-                    int h = view.getHeight();
-                    if (w <= 0 || h <= 0) return;
-                    try {
-                        painter.setBounds(0, 0, w, h);
-                        Canvas canvas = (Canvas) param.args[0];
-                        int save = canvas.save();
-                        painter.draw(canvas);
-                        canvas.restoreToCount(save);
-                    } catch (Throwable ignored) {
-                    }
+    /** 从球控件往下找第一个「自己重写了绘制方法、且面积够大」的 View。 */
+    private static View findPaintTarget(View root) {
+        if (pickPaintMethod(root.getClass()) != null) return root;
+        if (!(root instanceof ViewGroup)) return null;
+
+        int minSide = Math.max(1, Math.min(root.getWidth(), root.getHeight()) * 3 / 10);
+        java.util.ArrayDeque<View> queue = new java.util.ArrayDeque<>();
+        ViewGroup group = (ViewGroup) root;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            queue.add(group.getChildAt(i));
+        }
+        int guard = 0;
+        while (!queue.isEmpty() && guard++ < 64) {
+            View v = queue.poll();
+            if (v.getWidth() <= 0 || v.getHeight() <= 0) continue;
+            if (Math.min(v.getWidth(), v.getHeight()) < minSide) continue;
+            if (pickPaintMethod(v.getClass()) != null) return v;
+            if (v instanceof ViewGroup) {
+                ViewGroup vg = (ViewGroup) v;
+                for (int i = 0; i < vg.getChildCount(); i++) {
+                    queue.add(vg.getChildAt(i));
                 }
-            });
-            sDrawHooked = true;
-            XposedLog.i("已 hook 浮球绘制：" + name);
+            }
+        }
+        return null;
+    }
+
+    private static final XC_MethodHook DRAW_CALLBACK = new XC_MethodHook() {
+        @Override
+        protected void afterHookedMethod(MethodHookParam param) {
+            if (!(param.thisObject instanceof View)) return;
+            View view = (View) param.thisObject;
+            BallOverlay painter;
+            synchronized (PAINTERS) {
+                painter = PAINTERS.get(view);
+            }
+            if (painter == null) return;
+            if (!(param.args[0] instanceof Canvas)) return;
+            int w = view.getWidth();
+            int h = view.getHeight();
+            if (w <= 0 || h <= 0) return;
+            try {
+                painter.setBounds(0, 0, w, h);
+                Canvas canvas = (Canvas) param.args[0];
+                int save = canvas.save();
+                painter.draw(canvas);
+                canvas.restoreToCount(save);
+            } catch (Throwable ignored) {
+            }
+        }
+    };
+
+    /** @return true 表示已经找到并挂上绘制挂点。 */
+    private static boolean tryHookPaint(View ball, BallOverlay painter) {
+        try {
+            View target = findPaintTarget(ball);
+            if (target == null) return false;
+            Class<?> clazz = target.getClass();
+            Method method = pickPaintMethod(clazz);
+            if (method == null) return false;
+
+            synchronized (PAINTERS) {
+                PAINTERS.put(target, painter);
+            }
+            painter.setPaintHost(target);
+
+            synchronized (HOOKED_CLASSES) {
+                if (!HOOKED_CLASSES.contains(clazz)) {
+                    XposedBridge.hookMethod(method, DRAW_CALLBACK);
+                    HOOKED_CLASSES.add(clazz);
+                }
+            }
+            if (!sDrawHooked) {
+                sDrawHooked = true;
+                XposedLog.i("球面绘制挂点=" + clazz.getSimpleName() + "." + method.getName()
+                        + "，尺寸=" + target.getWidth() + "x" + target.getHeight());
+            } else {
+                XposedLog.i("新球实例已绑定绘制挂点 " + clazz.getSimpleName()
+                        + "，尺寸=" + target.getWidth() + "x" + target.getHeight());
+            }
+            return true;
         } catch (Throwable t) {
-            XposedLog.w("hook 浮球绘制失败", t);
+            XposedLog.w("挂绘制点失败", t);
+            return false;
         }
     }
 
@@ -236,22 +279,28 @@ public final class FloatingButtonHook {
                 }
             });
 
+            // 覆盖层只是过渡：球是子 View 自绘的，等它把子 View 铺好之后
+            // 把画布接到真正自绘的那个 View 上，再把这层撤掉。
+            // 第二个球实例（页面重建）也要走一遍，否则新实例没有绑定画家。
+            final BallCoverView cover;
             if (sDrawHooked) {
+                cover = null;
                 XposedLog.i("球面标识由绘制 hook 承载，尺寸 " + view.getWidth() + "x" + view.getHeight());
             } else {
                 XposedLog.i("准备挂载球面标识：host=" + view.getClass().getSimpleName()
                         + " 尺寸=" + view.getWidth() + "x" + view.getHeight()
                         + " 父=" + (view.getParent() == null
                                 ? "null" : view.getParent().getClass().getSimpleName()));
-                final BallCoverView cover = BallCoverView.attach(view, overlay);
-                if (cover == null) {
-                    view.post(() -> {
-                        if (BallCoverView.attach(view, overlay) == null) {
-                            attachOverlay(view, overlay);
-                        }
-                    });
-                }
+                cover = BallCoverView.attach(view, overlay);
             }
+            Runnable hookTask = () -> {
+                if (tryHookPaint(view, overlay) && cover != null) {
+                    cover.detach();
+                    XposedLog.i("已切换到绘制挂点，覆盖层已撤下");
+                }
+            };
+            view.post(hookTask);
+            view.postDelayed(hookTask, 700L);
         } catch (Throwable t) {
             XposedLog.w("叠加球面标识失败", t);
         }
