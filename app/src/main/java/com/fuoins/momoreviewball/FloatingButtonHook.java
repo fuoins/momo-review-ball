@@ -1,6 +1,7 @@
 package com.fuoins.momoreviewball;
 
 import android.app.Activity;
+import android.graphics.Canvas;
 import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
@@ -13,6 +14,7 @@ import org.xmlpull.v1.XmlPullParser;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -47,8 +49,12 @@ public final class FloatingButtonHook {
 
     private static final Map<View, TouchHandler> HOOKED = new WeakHashMap<>();
 
+    /** 每个球实例对应的绘制器，供 draw() hook 取用。 */
+    private static final Map<View, BallOverlay> PAINTERS = new WeakHashMap<>();
+
     private static volatile boolean sClassHooked;
     private static volatile boolean sInflateHooked;
+    private static volatile boolean sDrawHooked;
     private static volatile boolean sFound;
 
     private FloatingButtonHook() {
@@ -119,8 +125,75 @@ public final class FloatingButtonHook {
             }
             sClassHooked = true;
             XposedLog.i("已 hook " + CLASS_NAME + " 构造");
+            hookDraw(clazz);
         } catch (Throwable t) {
             XposedLog.e("hook 悬浮球类失败", t);
+        }
+    }
+
+    /**
+     * 在球控件自己的 {@code draw()} 之后补画球面标识。
+     *
+     * <p>这是唯一不用猜坐标的方案：canvas 就是球的 canvas，原点永远是球的左上角，
+     * 层级也一定在球的所有内容之上。之前的 ViewOverlay 报的是 582×582、
+     * 而控件只有 448×448；换成兄弟 View 又被父容器摆回 (0,0) 不跟手——
+     * 两种方案都在跟坐标系打架，直接画在球身上就没这问题。
+     */
+    private static void hookDraw(Class<?> clazz) {
+        Method target = null;
+        String name = null;
+        try {
+            target = clazz.getDeclaredMethod("draw", Canvas.class);
+            name = "draw";
+        } catch (NoSuchMethodException ignored) {
+        }
+        if (target == null) {
+            try {
+                target = clazz.getDeclaredMethod("onDraw", Canvas.class);
+                name = "onDraw";
+            } catch (NoSuchMethodException ignored) {
+            }
+        }
+        if (target == null) {
+            XposedLog.w("浮球没有重写 draw/onDraw，改用覆盖层绘制");
+            return;
+        }
+        // 只有 draw() 的末尾才是「全部内容画完」。onDraw() 之后还有 dispatchDraw
+        // 会把子 View 盖上来，色带会被球体自己挡住，所以那种情况仍走覆盖层。
+        if (!"draw".equals(name)) {
+            XposedLog.w("浮球只重写了 onDraw，绘制 hook 会被子 View 覆盖，改用覆盖层");
+            return;
+        }
+
+        try {
+            XposedBridge.hookMethod(target, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (!(param.thisObject instanceof View)) return;
+                    View view = (View) param.thisObject;
+                    BallOverlay painter;
+                    synchronized (PAINTERS) {
+                        painter = PAINTERS.get(view);
+                    }
+                    if (painter == null) return;
+                    if (!(param.args[0] instanceof Canvas)) return;
+                    int w = view.getWidth();
+                    int h = view.getHeight();
+                    if (w <= 0 || h <= 0) return;
+                    try {
+                        painter.setBounds(0, 0, w, h);
+                        Canvas canvas = (Canvas) param.args[0];
+                        int save = canvas.save();
+                        painter.draw(canvas);
+                        canvas.restoreToCount(save);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            });
+            sDrawHooked = true;
+            XposedLog.i("已 hook 浮球绘制：" + name);
+        } catch (Throwable t) {
+            XposedLog.w("hook 浮球绘制失败", t);
         }
     }
 
@@ -134,40 +207,50 @@ public final class FloatingButtonHook {
             overlay = new BallOverlay(view);
             handler = new TouchHandler(view, original, overlay);
             HOOKED.put(view, handler);
+            synchronized (PAINTERS) {
+                PAINTERS.put(view, overlay);
+            }
         }
         view.setOnTouchListener(handler);
 
         // 球面标识：沿轮廓的四向色带 + 中心动作文字。
-        // 首选「父容器里的兄弟 View」，因为它一定盖在球上面、坐标就是球的坐标；
-        // 只有父容器还用不了时才退回 ViewOverlay。
+        // 首选「在球自己的 draw() 之后补画」——坐标系天然正确、层级一定在最上；
+        // 类没重写 draw/onDraw 时才退回父容器里的覆盖 View，再不行退回 ViewOverlay。
         try {
-            XposedLog.i("准备挂载球面标识：host=" + view.getClass().getSimpleName()
-                    + " 尺寸=" + view.getWidth() + "x" + view.getHeight()
-                    + " 父=" + (view.getParent() == null
-                            ? "null" : view.getParent().getClass().getSimpleName()));
-            final BallCoverView cover = BallCoverView.attach(view, overlay);
-            if (cover != null) {
-                overlay.start();
-                view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
-                    @Override
-                    public void onViewAttachedToWindow(View v) {
-                        overlay.start();
+            overlay.start();
+            view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override
+                public void onViewAttachedToWindow(View v) {
+                    synchronized (PAINTERS) {
+                        PAINTERS.put(v, overlay);
                     }
+                    overlay.start();
+                }
 
-                    @Override
-                    public void onViewDetachedFromWindow(View v) {
-                        overlay.stop();
-                        cover.detach();
+                @Override
+                public void onViewDetachedFromWindow(View v) {
+                    overlay.stop();
+                    synchronized (PAINTERS) {
+                        PAINTERS.remove(v);
                     }
-                });
+                }
+            });
+
+            if (sDrawHooked) {
+                XposedLog.i("球面标识由绘制 hook 承载，尺寸 " + view.getWidth() + "x" + view.getHeight());
             } else {
-                view.post(() -> {
-                    if (BallCoverView.attach(view, overlay) != null) {
-                        overlay.start();
-                        return;
-                    }
-                    attachOverlay(view, overlay);
-                });
+                XposedLog.i("准备挂载球面标识：host=" + view.getClass().getSimpleName()
+                        + " 尺寸=" + view.getWidth() + "x" + view.getHeight()
+                        + " 父=" + (view.getParent() == null
+                                ? "null" : view.getParent().getClass().getSimpleName()));
+                final BallCoverView cover = BallCoverView.attach(view, overlay);
+                if (cover == null) {
+                    view.post(() -> {
+                        if (BallCoverView.attach(view, overlay) == null) {
+                            attachOverlay(view, overlay);
+                        }
+                    });
+                }
             }
         } catch (Throwable t) {
             XposedLog.w("叠加球面标识失败", t);

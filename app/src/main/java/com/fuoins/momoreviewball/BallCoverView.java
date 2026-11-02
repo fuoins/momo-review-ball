@@ -53,6 +53,7 @@ final class BallCoverView extends View {
             parent.addView(cover, lp);
             cover.bringToFront();
             cover.syncGeometry();
+            cover.registerPreDraw();
             host.getViewTreeObserver().addOnPreDrawListener(cover.preDraw);
             XposedLog.i("球面覆盖层已挂到 " + parent.getClass().getSimpleName()
                     + "，尺寸=" + host.getWidth() + "x" + host.getHeight());
@@ -112,6 +113,24 @@ final class BallCoverView extends View {
         }
         if (getVisibility() != host.getVisibility()) {
             setVisibility(host.getVisibility());
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        // ViewTreeObserver 会在控件重新 attach 时换新，旧的监听器跟着失效，
+        // 覆盖层就再也不会跟着球走（表现为停在 (0,0) 不动）。这里重新挂一次。
+        registerPreDraw();
+        syncGeometry();
+    }
+
+    private void registerPreDraw() {
+        try {
+            ViewTreeObserver vto = getViewTreeObserver();
+            vto.removeOnPreDrawListener(preDraw);
+            vto.addOnPreDrawListener(preDraw);
+        } catch (Throwable ignored) {
         }
     }
 

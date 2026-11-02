@@ -52,7 +52,7 @@ final class BallOverlay extends Drawable {
     private final Runnable clearHighlight = () -> {
         highlight = 0;
         progress = 0f;
-        invalidateSelf();
+        refresh();
     };
 
     private final Runnable tick = new Runnable() {
@@ -62,7 +62,7 @@ final class BallOverlay extends Drawable {
             boolean now = detectAfter();
             if (now != after) {
                 after = now;
-                invalidateSelf();
+                refresh();
             }
             handler.postDelayed(this, 800L);
         }
@@ -89,6 +89,20 @@ final class BallOverlay extends Drawable {
         handler.postDelayed(tick, 800L);
     }
 
+    /**
+     * 重绘请求。
+     *
+     * <p>直接用 drawable 时 {@code invalidateSelf()} 靠 callback 冒泡到控件，
+     * 但这里没有走 {@code getOverlay().add()}，callback 是空的，必须自己叫醒控件。
+     */
+    private void refresh() {
+        invalidateSelf();
+        try {
+            host.invalidate();
+        } catch (Throwable ignored) {
+        }
+    }
+
     void stop() {
         running = false;
         handler.removeCallbacks(tick);
@@ -100,7 +114,7 @@ final class BallOverlay extends Drawable {
         this.highlight = gesture;
         this.progress = Math.max(0f, Math.min(1f, ratio));
         handler.removeCallbacks(clearHighlight);
-        invalidateSelf();
+        refresh();
         if (gesture == 0) {
             handler.postDelayed(clearHighlight, 140L);
         }
