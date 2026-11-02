@@ -16,7 +16,7 @@ import android.graphics.Typeface;
 final class BallPainter {
 
     private static final String[] SHORT_LABELS = {
-            "无", "认识", "模糊", "忘记", "熟知", "发音", "显示", "返回"
+            "无", "认识", "模糊", "忘记", "熟知", "发音", "显示", "瞄", "返回"
     };
 
     /** 上 / 下 / 左 / 右 四条色带的中心角（0° 在 3 点钟方向，顺时针）。 */

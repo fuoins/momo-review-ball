@@ -53,6 +53,9 @@ public final class ActionExecutor {
             case Config.ACTION_SHOW:
                 ok = showAnswer(activity);
                 break;
+            case Config.ACTION_PEEK:
+                ok = peek(activity);
+                break;
             case Config.ACTION_PREV:
                 ok = previous(activity);
                 break;
@@ -116,6 +119,21 @@ public final class ActionExecutor {
             return true;
         }
         return false;
+    }
+
+    /**
+     * 官方「瞄一眼」。
+     *
+     * <p>墨墨自己在拼写模式（手写 / 键盘输入）的输入条右侧放了两个眼睛按钮，
+     * 资源名是 {@code btn_peek_handwriting} / {@code btn_peek_keyboard}，
+     * contentDescription 就叫「瞄一眼」。这里只点官方控件，
+     * 不再像旧版本那样自己画一层气泡去猜单词——那句话本来就不算「瞄一眼」。
+     */
+    private static boolean peek(Activity activity) {
+        if (clickId(activity, "btn_peek_handwriting", "btn_peek_keyboard")) return true;
+        if (clickByDescription(activity, new String[]{"瞄一眼"})) return true;
+        if (clickText(activity, new String[]{"瞄一眼"}, true)) return true;
+        return clickByIdKeyword(activity, new String[]{"peek"});
     }
 
     private static boolean previous(Activity activity) {

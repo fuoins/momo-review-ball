@@ -203,6 +203,11 @@ final class BallOverlay extends Drawable {
         float radius = Math.min(ball.width(), ball.height()) / 2f;
         if (radius < Util.dp(context, 8f)) return;
 
+        // 记下真球的物理直径，设置页的预览按同一个 dp 尺寸画，
+        // 否则预览和复习页各画各的，滑杆 1.0 对不上实际大小。
+        Config.rememberNativeBallDiameterDp(context,
+                radius * 2f / context.getResources().getDisplayMetrics().density);
+
         // 球体自己可能带阴影，往外留一点点，别把球撑大。
         // 只留 1%：原生那条色环就贴在球的最外沿，留多了会露出一条原来的颜色。
         ball.inset(radius * 0.01f, radius * 0.01f);

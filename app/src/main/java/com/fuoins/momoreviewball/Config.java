@@ -16,6 +16,9 @@ public final class Config {
 
     static final String SP_NAME = "momo_ball_config";
     private static final String KEY_JSON = "config";
+    private static final String KEY_NATIVE_BALL_DP = "native_ball_dp";
+    /** 配置结构版本：2 起带这个字段，用于区分 3.0.x 存下的旧配置。 */
+    private static final int SCHEMA = 2;
 
     public static final String ACTION_NONE = "none";
     public static final String ACTION_KNOW = "know";
@@ -24,15 +27,18 @@ public final class Config {
     public static final String ACTION_FAMILIAR = "familiar";
     public static final String ACTION_PRONOUNCE = "pronounce";
     public static final String ACTION_SHOW = "show";
+    /** 官方「瞄一眼」：拼写模式输入条上的眼睛按钮，不是模块自己画的气泡。 */
+    public static final String ACTION_PEEK = "peek";
     public static final String ACTION_PREV = "prev";
 
     /** 全部动作。数组顺序固定，球心短标签按同一顺序取。 */
     public static final String[] ACTION_KEYS = {
             ACTION_NONE, ACTION_KNOW, ACTION_VAGUE, ACTION_FORGET, ACTION_FAMILIAR,
-            ACTION_PRONOUNCE, ACTION_SHOW, ACTION_PREV
+            ACTION_PRONOUNCE, ACTION_SHOW, ACTION_PEEK, ACTION_PREV
     };
     public static final String[] ACTION_LABELS = {
-            "无操作", "认识", "模糊", "忘记", "熟知", "发音", "显示单词", "返回上一个单词"
+            "无操作", "认识", "模糊", "忘记", "熟知", "发音", "显示单词", "瞄一眼",
+            "返回上一个单词"
     };
 
     /**
@@ -42,9 +48,9 @@ public final class Config {
      * 所以这里按阶段给两套独立的候选，而不是拿一张大表糊弄。
      */
     public static final String[] BEFORE_ACTIONS = {
-            ACTION_SHOW, ACTION_PRONOUNCE, ACTION_PREV, ACTION_NONE
+            ACTION_SHOW, ACTION_PEEK, ACTION_PRONOUNCE, ACTION_PREV, ACTION_NONE
     };
-    /** 「单词出现后」能选的动作。「瞄一眼」对不上官方控件，已整条移除。 */
+    /** 「单词出现后」能选的动作。答案已经显示，瞄一眼/显示单词都无事可做。 */
     public static final String[] AFTER_ACTIONS = {
             ACTION_KNOW, ACTION_VAGUE, ACTION_FORGET, ACTION_FAMILIAR,
             ACTION_PRONOUNCE, ACTION_PREV, ACTION_NONE
@@ -58,7 +64,7 @@ public final class Config {
     public static final String[] GESTURE_LABELS = {"单击", "上滑", "下滑", "左滑", "右滑"};
 
     public static final String[] DEFAULT_BEFORE = {
-            ACTION_SHOW, ACTION_PRONOUNCE, ACTION_NONE, ACTION_PREV, ACTION_NONE
+            ACTION_SHOW, ACTION_PRONOUNCE, ACTION_PEEK, ACTION_PREV, ACTION_NONE
     };
     public static final String[] DEFAULT_AFTER = {
             ACTION_KNOW, ACTION_FAMILIAR, ACTION_FORGET, ACTION_VAGUE, ACTION_PREV
@@ -164,6 +170,7 @@ public final class Config {
             o.put("enabled", enabled);
             o.put("locked", locked);
             o.put("scale", (double) scale);
+            o.put("schema", SCHEMA);
             o.put("before", new JSONArray(Arrays.asList(before)));
             o.put("after", new JSONArray(Arrays.asList(after)));
         } catch (Throwable ignored) {
@@ -181,9 +188,53 @@ public final class Config {
             c.scale = clamp((float) o.optDouble("scale", 1.0), SCALE_MIN, SCALE_MAX);
             c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE, false);
             c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER, true);
+
+            // 3.0.x 把「瞄一眼」整条拿掉时，默认配置里的下滑被折成了「无操作」。
+            // 这里只认「其余四项还是原样」的默认形态，把下滑补回瞄一眼；
+            // 用户自己改过的手势一律不动。
+            if (!o.has("schema")
+                    && ACTION_NONE.equals(c.before[2])
+                    && ACTION_PRONOUNCE.equals(c.before[1])
+                    && ACTION_PREV.equals(c.before[3])) {
+                c.before[2] = ACTION_PEEK;
+            }
         } catch (Throwable ignored) {
         }
         return c;
+    }
+
+    /** 真球直径的进程内缓存，避免每帧都读一遍 SharedPreferences。 */
+    private static volatile float cachedNativeBallDp;
+
+    /**
+     * 真球的物理直径（dp）。
+     *
+     * <p>墨墨的球是 dp 尺寸，各机型 px 不同；{@link BallOverlay} 第一次画的时候
+     * 把实测值记下来，设置页的预览按同一尺寸画，滑杆 1.0 才真的等于复习页那颗球。
+     */
+    static float nativeBallDiameterDp(Context context) {
+        float fallback = 74.7f;
+        float cached = cachedNativeBallDp;
+        if (cached > 0f) return cached;
+        try {
+            SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            float value = sp.getFloat(KEY_NATIVE_BALL_DP, fallback);
+            cachedNativeBallDp = value;
+            return value;
+        } catch (Throwable ignored) {
+            return fallback;
+        }
+    }
+
+    static void rememberNativeBallDiameterDp(Context context, float dp) {
+        if (dp < 20f || dp > 200f) return;
+        if (Math.abs(cachedNativeBallDp - dp) < 0.5f) return;
+        cachedNativeBallDp = dp;
+        try {
+            SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            sp.edit().putFloat(KEY_NATIVE_BALL_DP, dp).apply();
+        } catch (Throwable ignored) {
+        }
     }
 
     /**

@@ -56,6 +56,8 @@ public final class SettingsPanel {
                 return 0xFF9E9E9E;   // 返回上一个单词 · 灰
             case Config.ACTION_SHOW:
                 return 0xFF546E7A;   // 显示单词 · 蓝灰
+            case Config.ACTION_PEEK:
+                return 0xFF3E8ED0;   // 瞄一眼 · 蓝
             default:
                 return 0xFFBDBDBD;   // 无操作
         }
@@ -89,14 +91,26 @@ public final class SettingsPanel {
         final TextView familiarNotice = notice(activity,
                 "用到了「熟知」：请到 更多设置 → 复习页面 → 工具栏快捷，打开「标识熟知」，"
                         + "否则球上点不出「熟知」。");
-        final Runnable syncNotice = () -> familiarNotice.setVisibility(
+        final Runnable syncFamiliar = () -> familiarNotice.setVisibility(
                 usesFamiliar(config) ? View.VISIBLE : View.GONE);
 
+        final TextView peekNotice = notice(activity,
+                "「瞄一眼」点的是墨墨拼写模式输入条右侧的眼睛按钮（手写 / 键盘两种模式都有），"
+                        + "普通复习模式没有这个按钮。");
+        final Runnable syncPeek = () -> peekNotice.setVisibility(
+                containsAction(config.before, Config.ACTION_PEEK) ? View.VISIBLE : View.GONE);
+
+        final Runnable syncNotice = () -> {
+            syncFamiliar.run();
+            syncPeek.run();
+        };
+
         card.addView(sectionTitle(activity, "单词出现前"));
-        card.addView(hint(activity, "还没显示答案时生效（只有显示单词 / 发音 / 返回）"));
+        card.addView(hint(activity, "还没显示答案时生效（显示单词 / 瞄一眼 / 发音 / 返回）"));
         for (int i = 0; i < Config.GESTURE_LABELS.length; i++) {
             card.addView(gestureRow(activity, config, false, i, syncNotice, reloaders));
         }
+        card.addView(peekNotice);
 
         card.addView(sectionTitle(activity, "单词出现后"));
         card.addView(hint(activity, "出现「认识 / 模糊 / 忘记」评分按钮后生效"));
