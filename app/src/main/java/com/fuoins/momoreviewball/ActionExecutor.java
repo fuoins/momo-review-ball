@@ -166,19 +166,10 @@ public final class ActionExecutor {
                                 XposedLog.i("瞄一眼：松手后界面有变化，回放生效");
                                 return;
                             }
-                            XposedLog.w("瞄一眼：左滑按住预览全程无变化，改为直调官方手势回调");
-                            if (!FloatingButtonHook.callFloatBtnListener(2)) {
-                                peekFallback(activity, before);
-                                return;
-                            }
-                            decor.postDelayed(() -> {
-                                if (peekChanged(activity, before)) {
-                                    XposedLog.i("瞄一眼：官方手势回调 a(2) 已生效");
-                                    return;
-                                }
-                                XposedLog.w("瞄一眼：官方手势回调 a(2) 也没有反应");
-                                peekFallback(activity, before);
-                            }, 400L);
+                            // 不再盲调官方回调：日志已经证明 a(2) 走的是「显示答案」，
+                            // 盲目试参数会把答案直接翻出来，反而干扰复习。
+                            XposedLog.w("瞄一眼：左滑按住预览全程无变化，等待手动校准");
+                            peekFallback(activity, before);
                         }, 1000L);
                     }, 700L);
                 }, 700L);

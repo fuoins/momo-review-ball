@@ -292,8 +292,8 @@ public final class FloatingButtonHook {
                 XposedBridge.hookMethod(method, new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) {
-                        XposedLog.i("官方手势回调被调用："
-                                + param.method.getName() + "(" + param.args[0] + ")");
+                        XposedLog.i("官方手势回调被调用：" + param.method.getName()
+                                + "(" + param.args[0] + ")" + callStack());
                     }
                 });
                 XposedLog.i("已监听官方手势回调 " + method.getName() + "(int)");
@@ -301,6 +301,106 @@ public final class FloatingButtonHook {
         } catch (Throwable t) {
             XposedLog.w("监听官方手势回调失败", t);
         }
+    }
+
+    /** 调用栈：手动滑一次球，就能看出是哪个方法在调官方回调。 */
+    private static String callStack() {
+        StringBuilder sb = new StringBuilder();
+        StackTraceElement[] stack = new Throwable().getStackTrace();
+        int shown = 0;
+        for (StackTraceElement e : stack) {
+            String name = e.getClassName();
+            if (name.startsWith("de.robv.android.xposed") || name.startsWith("java.lang")
+                    || name.contains("FloatingButtonHook")) {
+                continue;
+            }
+            sb.append("\n    at ").append(name).append('.').append(e.getMethodName())
+                    .append('(').append(e.getFileName()).append(':').append(e.getLineNumber()).append(')');
+            if (++shown >= 8) break;
+        }
+        return sb.toString();
+    }
+
+    // ---------------------------------------------------------------- 触摸追踪
+
+    private static final Map<View, Boolean> TRACED = new WeakHashMap<>();
+    private static long sTraceDownTime;
+    private static int sTraceLines;
+
+    /**
+     * 把球和它父容器的触摸处理全部打点。
+     *
+     * <p>现在已知「直调球的 onTouchEvent / dispatchTouchEvent 都返回 false」，
+     * 但真手指明明能拖动球——说明处理触摸的层级和我们想的不一样。
+     * 这份追踪用真手指滑一次就能看出来：哪一层先收到 DOWN、谁消费了、球的
+     * onTouchEvent 到底有没有被调用。
+     */
+    private static void traceTouch(View view) {
+        synchronized (TRACED) {
+            if (TRACED.containsKey(view)) return;
+            TRACED.put(view, Boolean.TRUE);
+        }
+        traceOne(view);
+        ViewParent parent = view.getParent();
+        if (parent instanceof View) traceOne((View) parent);
+    }
+
+    private static void traceOne(final View target) {
+        final String tag = target.getClass().getSimpleName();
+        for (final String name : new String[]{"dispatchTouchEvent", "onInterceptTouchEvent", "onTouchEvent"}) {
+            try {
+                XposedHelpers.findAndHookMethod(target.getClass(), name, MotionEvent.class,
+                        new XC_MethodHook() {
+                            @Override
+                            protected void beforeHookedMethod(MethodHookParam param) {
+                                if (param.thisObject != target) return;
+                                MotionEvent event = (MotionEvent) param.args[0];
+                                traceLine(tag + "." + name + " " + describe(event));
+                            }
+
+                            @Override
+                            protected void afterHookedMethod(MethodHookParam param) {
+                                if (param.thisObject != target) return;
+                                traceLine("    " + tag + "." + name + " -> " + param.getResult());
+                            }
+                        });
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private static String describe(MotionEvent event) {
+        String action;
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                action = "DOWN";
+                break;
+            case MotionEvent.ACTION_MOVE:
+                action = "MOVE";
+                break;
+            case MotionEvent.ACTION_UP:
+                action = "UP";
+                break;
+            case MotionEvent.ACTION_CANCEL:
+                action = "CANCEL";
+                break;
+            default:
+                action = String.valueOf(event.getActionMasked());
+                break;
+        }
+        return action + " x=" + Math.round(event.getX()) + " y=" + Math.round(event.getY())
+                + " raw=(" + Math.round(event.getRawX()) + ',' + Math.round(event.getRawY()) + ')';
+    }
+
+    /** 一次手势最多记 160 行，防止刷爆环形缓冲。 */
+    private static void traceLine(String line) {
+        if (line.contains("DOWN ")) {
+            sTraceDownTime = SystemClock.uptimeMillis();
+            sTraceLines = 0;
+        }
+        if (sTraceLines >= 160) return;
+        sTraceLines++;
+        XposedLog.d("触摸 " + line);
     }
 
     /**
@@ -480,6 +580,7 @@ public final class FloatingButtonHook {
             XposedLog.i(sb.toString());
             dumpTouchChain(view);
             dumpMethods(view);
+            traceTouch(view);
         });
 
         // 复习页一出现就把日志落盘，设置页注入失败时也能从文件里拿到
@@ -657,7 +758,7 @@ public final class FloatingButtonHook {
         /** 每帧间隔，接近真手指 60Hz 的采样间隔。 */
         private static final int MOVE_STEP_MS = 16;
         /** 滑到位后按住多久：官方「瞄一眼」是按住预览、松手即恢复。 */
-        private static final long HOLD_MS = 1500L;
+        private static final long HOLD_MS = 900L;
 
         /** 正在给原生补发 CANCEL，这一趟的分发要原样放行。 */
         private boolean injecting;
