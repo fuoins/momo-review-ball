@@ -28,6 +28,8 @@ public final class SettingsInjector {
 
     private static final String ACTIVITY = "com.maimemo.android.momo.settings.study.StudyGestureActivity";
     private static final String TAG = "momo_ball_settings_entry";
+    /** 旧的浮动入口用独立 tag，避免和已经内联的面板互相干扰，也方便注入成功后清掉。 */
+    private static final String BTN_TAG = TAG + "_btn";
     private static final int ORANGE = 0xFFF2A33C;
 
     /** 页面是异步铺开的，注入要等；重试这么多次还不行才退回浮动入口。 */
@@ -113,6 +115,7 @@ public final class SettingsInjector {
         View panel = SettingsPanel.create(activity);
         panel.setTag(TAG);
         if (mergeIntoScroll(activity, root, panel, recycler)) {
+            removeFloatingButton(root);
             return true;
         }
 
@@ -134,6 +137,7 @@ public final class SettingsInjector {
                 }
                 XposedLog.i("已内联模块配置，容器=" + parent.getClass().getName()
                         + "，子项数=" + parent.getChildCount());
+                removeFloatingButton(root);
                 return true;
             } catch (Throwable t) {
                 XposedLog.w("内联失败：" + t, t);
@@ -375,8 +379,10 @@ public final class SettingsInjector {
     }
 
     private static void addFloatingButton(final Activity activity, ViewGroup root) {
+        if (root.findViewWithTag(BTN_TAG) != null) return;
+
         TextView button = new TextView(activity);
-        button.setTag(TAG);
+        button.setTag(BTN_TAG);
         button.setText("模块设置");
         button.setTextColor(Color.WHITE);
         button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
@@ -401,5 +407,17 @@ public final class SettingsInjector {
         root.addView(button);
         button.bringToFront();
         XposedLog.i("已在手势设置页注入浮动入口");
+    }
+
+    /** 内联成功之后把之前退化的浮动入口撤掉，避免页面右下角一直挂着一个橙色按钮。 */
+    private static void removeFloatingButton(ViewGroup root) {
+        try {
+            View old = root.findViewWithTag(BTN_TAG);
+            if (old != null && old.getParent() instanceof ViewGroup) {
+                ((ViewGroup) old.getParent()).removeView(old);
+                XposedLog.i("已移除遗留的浮动入口");
+            }
+        } catch (Throwable ignored) {
+        }
     }
 }

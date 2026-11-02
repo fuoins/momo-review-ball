@@ -137,41 +137,38 @@ public final class FloatingButtonHook {
         }
         view.setOnTouchListener(handler);
 
-        // 球面标识：沿轮廓的四向色带 + 中心动作文字，纯叠加，不拦截触摸
+        // 球面标识：沿轮廓的四向色带 + 中心动作文字。
+        // 首选「父容器里的兄弟 View」，因为它一定盖在球上面、坐标就是球的坐标；
+        // 只有父容器还用不了时才退回 ViewOverlay。
         try {
             XposedLog.i("准备挂载球面标识：host=" + view.getClass().getSimpleName()
                     + " 尺寸=" + view.getWidth() + "x" + view.getHeight()
                     + " 父=" + (view.getParent() == null
-                            ? "null" : view.getParent().getClass().getSimpleName())
-                    + " overlay=" + view.getOverlay());
-            view.getOverlay().add(overlay);
-            XposedLog.i("球面标识已加入 overlay");
-            overlay.start();
+                            ? "null" : view.getParent().getClass().getSimpleName()));
+            final BallCoverView cover = BallCoverView.attach(view, overlay);
+            if (cover != null) {
+                overlay.start();
+                view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                    @Override
+                    public void onViewAttachedToWindow(View v) {
+                        overlay.start();
+                    }
 
-            // ViewOverlay 只在 add 的那一刻按控件宽高设一次 bounds。
-            // 构造 / inflate 阶段控件还没测量，尺寸为 0，bounds 会一直是 0×0，
-            // 之后 draw 就再也画不出东西——必须在布局完成后补一次，并跟着尺寸变化。
-            view.addOnLayoutChangeListener((v, left, top, right, bottom,
-                                            oldLeft, oldTop, oldRight, oldBottom) -> {
-                overlay.setBounds(0, 0, v.getWidth(), v.getHeight());
-            });
-            view.post(() -> {
-                overlay.setBounds(0, 0, view.getWidth(), view.getHeight());
-                XposedLog.i("已设置球面标识范围 " + view.getWidth() + "x" + view.getHeight());
-            });
-
-            view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
-                @Override
-                public void onViewAttachedToWindow(View v) {
-                    overlay.setBounds(0, 0, v.getWidth(), v.getHeight());
-                    overlay.start();
-                }
-
-                @Override
-                public void onViewDetachedFromWindow(View v) {
-                    overlay.stop();
-                }
-            });
+                    @Override
+                    public void onViewDetachedFromWindow(View v) {
+                        overlay.stop();
+                        cover.detach();
+                    }
+                });
+            } else {
+                view.post(() -> {
+                    if (BallCoverView.attach(view, overlay) != null) {
+                        overlay.start();
+                        return;
+                    }
+                    attachOverlay(view, overlay);
+                });
+            }
         } catch (Throwable t) {
             XposedLog.w("叠加球面标识失败", t);
         }
@@ -201,6 +198,35 @@ public final class FloatingButtonHook {
 
         // 复习页一出现就把日志落盘，设置页注入失败时也能从文件里拿到
         view.postDelayed(() -> Diag.flush(view.getContext()), 1500L);
+    }
+
+    /** 兜底：父容器不可用时退回 ViewOverlay，尺寸每次绘制前强制对齐控件。 */
+    private static void attachOverlay(final View view, final BallOverlay overlay) {
+        try {
+            view.getOverlay().add(overlay);
+            overlay.start();
+            view.addOnLayoutChangeListener((v, left, top, right, bottom,
+                                            oldLeft, oldTop, oldRight, oldBottom) ->
+                    overlay.setBounds(0, 0, v.getWidth(), v.getHeight()));
+            view.post(() -> {
+                overlay.setBounds(0, 0, view.getWidth(), view.getHeight());
+                XposedLog.i("已改用 overlay 承载球面标识，范围 " + view.getWidth() + "x" + view.getHeight());
+            });
+            view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override
+                public void onViewAttachedToWindow(View v) {
+                    overlay.setBounds(0, 0, v.getWidth(), v.getHeight());
+                    overlay.start();
+                }
+
+                @Override
+                public void onViewDetachedFromWindow(View v) {
+                    overlay.stop();
+                }
+            });
+        } catch (Throwable t) {
+            XposedLog.w("overlay 兜底也失败", t);
+        }
     }
 
     private static View.OnTouchListener readTouchListener(View view) {

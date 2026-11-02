@@ -108,22 +108,21 @@ final class BallOverlay extends Drawable {
 
     @Override
     public void draw(Canvas canvas) {
+        // overlay 模式下 bounds 常常和控件对不上（实测 582 vs 控件 448），
+        // 画出来的弧整个落到球外面，所以每次绘制都按控件实际尺寸强制对齐。
+        int hostW = host.getWidth();
+        int hostH = host.getHeight();
         Rect b = getBounds();
+        if (hostW > 0 && hostH > 0 && (b.width() != hostW || b.height() != hostH)) {
+            setBounds(0, 0, hostW, hostH);
+            b = getBounds();
+        }
         if (b.width() <= 0 || b.height() <= 0) {
-            // ViewOverlay 是在 add() 那一刻按控件当时的宽高设 bounds 的。
-            // inflate 阶段控件还没测量，尺寸是 0，bounds 就永久停在 0×0，
-            // draw 会被这里直接 return 掉——表现就是「球上什么都没变」。
-            // 所以尺寸拿不到时退回控件当前的实际大小。
-            int w = host.getWidth();
-            int h = host.getHeight();
-            if (w <= 0 || h <= 0) {
-                if (!reportedZero) {
-                    reportedZero = true;
-                    XposedLog.w("球面标识拿不到尺寸：bounds=0，控件也还是 0×0");
-                }
-                return;
+            if (!reportedZero) {
+                reportedZero = true;
+                XposedLog.w("球面标识拿不到尺寸：bounds=0，控件也还是 0×0");
             }
-            b.set(0, 0, w, h);
+            return;
         }
 
         Config config = Config.get(host.getContext());
@@ -131,9 +130,12 @@ final class BallOverlay extends Drawable {
 
         if (!reported) {
             reported = true;
+            Rect clip = new Rect();
+            canvas.getClipBounds(clip);
             XposedLog.i("球面标识开始绘制 " + b.width() + "x" + b.height()
                     + "，子View=" + (host instanceof ViewGroup
-                            ? ((ViewGroup) host).getChildCount() : -1));
+                            ? ((ViewGroup) host).getChildCount() : -1)
+                    + "，裁剪区=" + clip.width() + "x" + clip.height());
         }
 
         Context context = host.getContext();
