@@ -55,8 +55,9 @@ public final class SettingsPanel {
         }
 
         box.addView(sectionTitle(activity, "悬浮球"));
-        box.addView(switchRow(activity, "长按锁定位置", config.longPressLock, checked -> {
-            config.longPressLock = checked;
+        box.addView(hint(activity, "拖动、边界吸附、按压动画都沿用墨墨自带的，模块只改手势对应的动作"));
+        box.addView(switchRow(activity, "锁定位置（长按也拖不动）", config.locked, checked -> {
+            config.locked = checked;
             config.save(activity);
         }));
         box.addView(switchRow(activity, "操作振动", config.haptic, checked -> {

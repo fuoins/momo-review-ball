@@ -47,14 +47,11 @@ public final class Config {
     };
 
     public boolean enabled = true;
+    /** 锁定后悬浮球不可拖动，位置与拖动边界仍由墨墨自己管理。 */
     public boolean locked = false;
-    public boolean longPressLock = true;
     public boolean haptic = true;
     public boolean diagnose = true;
     public int peekMs = 1600;
-    /** 相对初始位置的偏移，按屏幕宽高归一化，换分辨率不跑偏。 */
-    public float offsetXRatio = 0f;
-    public float offsetYRatio = 0f;
     public String[] before = DEFAULT_BEFORE.clone();
     public String[] after = DEFAULT_AFTER.clone();
 
@@ -98,12 +95,9 @@ public final class Config {
     public void reset() {
         enabled = true;
         locked = false;
-        longPressLock = true;
         haptic = true;
         diagnose = true;
         peekMs = 1600;
-        offsetXRatio = 0f;
-        offsetYRatio = 0f;
         before = DEFAULT_BEFORE.clone();
         after = DEFAULT_AFTER.clone();
     }
@@ -121,12 +115,9 @@ public final class Config {
         try {
             o.put("enabled", enabled);
             o.put("locked", locked);
-            o.put("longPressLock", longPressLock);
             o.put("haptic", haptic);
             o.put("diagnose", diagnose);
             o.put("peekMs", peekMs);
-            o.put("offsetXRatio", (double) offsetXRatio);
-            o.put("offsetYRatio", (double) offsetYRatio);
             o.put("before", new JSONArray(Arrays.asList(before)));
             o.put("after", new JSONArray(Arrays.asList(after)));
         } catch (Throwable ignored) {
@@ -141,12 +132,9 @@ public final class Config {
             JSONObject o = new JSONObject(json);
             c.enabled = o.optBoolean("enabled", c.enabled);
             c.locked = o.optBoolean("locked", c.locked);
-            c.longPressLock = o.optBoolean("longPressLock", c.longPressLock);
             c.haptic = o.optBoolean("haptic", c.haptic);
             c.diagnose = o.optBoolean("diagnose", c.diagnose);
             c.peekMs = clamp(o.optInt("peekMs", c.peekMs), 600, 5000);
-            c.offsetXRatio = clamp((float) o.optDouble("offsetXRatio", c.offsetXRatio), -3f, 3f);
-            c.offsetYRatio = clamp((float) o.optDouble("offsetYRatio", c.offsetYRatio), -3f, 3f);
             c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE);
             c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER);
         } catch (Throwable ignored) {

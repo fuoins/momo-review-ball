@@ -12,6 +12,10 @@ final class XposedLog {
         log("I", msg, null);
     }
 
+    static void d(String msg) {
+        log("D", msg, null);
+    }
+
     static void w(String msg) {
         log("W", msg, null);
     }
@@ -34,6 +38,8 @@ final class XposedLog {
                 android.util.Log.e("MoMoBall", msg, t);
             } else if ("W".equals(level)) {
                 android.util.Log.w("MoMoBall", msg, t);
+            } else if ("D".equals(level)) {
+                android.util.Log.d("MoMoBall", msg, t);
             } else {
                 android.util.Log.i("MoMoBall", msg, t);
             }

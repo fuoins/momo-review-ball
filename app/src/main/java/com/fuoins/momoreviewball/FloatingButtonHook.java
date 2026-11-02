@@ -1,11 +1,7 @@
 package com.fuoins.momoreviewball;
 
 import android.app.Activity;
-import android.content.Context;
-import android.os.Handler;
-import android.os.Looper;
-import android.util.DisplayMetrics;
-import android.util.Log;
+import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
@@ -27,8 +23,14 @@ import de.robv.android.xposed.XposedHelpers;
 /**
  * 接管墨墨自带的复习悬浮球（{@code rev_floating_btn} / MMFloatingButton）。
  *
- * <p>不绘制自己的球：外观、位置、层级全部沿用墨墨的控件，只把触摸事件接管过来，
- * 按模块配置执行动作。自带球原有的手势因此失效，这是接管的前提。
+ * <p>接管方式是「代理」而不是「替换」：
+ * <ul>
+ *   <li>所有触摸事件默认原样转发给墨墨自己的监听器 / {@code onTouchEvent}，
+ *       所以自带的按压动画、拖动跟手、边界吸附、长按拖动全部保持原样；</li>
+ *   <li>只有在手指抬起（{@code ACTION_UP}）且这一轮没有走「长按拖动」时，
+ *       才拦下这次抬手，按模块配置执行动作，并向原生补发一个
+ *       {@code ACTION_CANCEL} 让控件清理按压态——原生因此不会重复执行它自己的手势。</li>
+ * </ul>
  *
  * <p>定位方式有两路，互为兜底：
  * <ol>
@@ -83,7 +85,7 @@ public final class FloatingButtonHook {
 
     private static void scan(View root) {
         try {
-            Context context = root.getContext();
+            android.content.Context context = root.getContext();
             if (context == null) return;
             int id = context.getResources().getIdentifier(ID_NAME, "id", context.getPackageName());
             if (id == 0) return;
@@ -123,24 +125,17 @@ public final class FloatingButtonHook {
     }
 
     static void attach(final View view) {
+        final View.OnTouchListener original;
         final TouchHandler handler;
         synchronized (HOOKED) {
             if (HOOKED.containsKey(view)) return;
-            handler = new TouchHandler(view);
+            original = readTouchListener(view);
+            handler = new TouchHandler(view, original);
             HOOKED.put(view, handler);
         }
-
-        final View.OnTouchListener original = readTouchListener(view);
-        view.setOnTouchListener((v, event) -> {
-            Config config = Config.get(v.getContext());
-            if (!config.enabled) {
-                return original != null && original.onTouch(v, event);
-            }
-            return handler.onTouch(v, event);
-        });
-        view.post(handler::applyPosition);
+        view.setOnTouchListener(handler);
         sFound = true;
-        XposedLog.i("已接管自带悬浮球，原有 listener=" + original);
+        XposedLog.i("已代理自带悬浮球，原有 listener=" + original);
     }
 
     private static View.OnTouchListener readTouchListener(View view) {
@@ -153,139 +148,156 @@ public final class FloatingButtonHook {
         }
     }
 
-    /** 自带悬浮球的手势识别。 */
-    static final class TouchHandler {
+    /** 代理自带悬浮球的触摸：默认全转发，只在抬手时接管手势判定。 */
+    static final class TouchHandler implements View.OnTouchListener {
 
         private final View view;
-        private final Handler handler = new Handler(Looper.getMainLooper());
-        private final int touchSlop;
-        private Config config;
+        private final View.OnTouchListener original;
+        private final int slop;
+        private final int longPressTimeout;
 
-        private float downRawX;
-        private float downRawY;
-        private float baseTranslationX;
-        private float baseTranslationY;
+        private boolean tracking;
         private boolean dragging;
-        private boolean longFired;
+        private long downAt;
+        private float downX;
+        private float downY;
+        private float downViewX;
+        private float downViewY;
 
-        private final Runnable longPressRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (dragging) return;
-                longFired = true;
-                boolean target = !config.locked;
-                config.locked = target;
-                config.save(view.getContext());
-                view.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-                Activity activity = Util.findActivity(view.getContext());
-                if (activity != null) {
-                    ActionExecutor.toast(activity, target ? "已固定位置，长按可解锁" : "已解锁，可以拖动");
-                }
-            }
-        };
-
-        TouchHandler(View view) {
+        TouchHandler(View view, View.OnTouchListener original) {
             this.view = view;
-            this.touchSlop = ViewConfiguration.get(view.getContext()).getScaledTouchSlop();
-            this.config = Config.get(view.getContext());
+            this.original = original;
+            ViewConfiguration vc = ViewConfiguration.get(view.getContext());
+            this.slop = Math.max(vc.getScaledTouchSlop(), 1);
+            this.longPressTimeout = ViewConfiguration.getLongPressTimeout();
         }
 
-        void applyPosition() {
-            config = Config.get(view.getContext());
-            DisplayMetrics metrics = view.getResources().getDisplayMetrics();
-            view.setTranslationX(config.offsetXRatio * metrics.widthPixels);
-            view.setTranslationY(config.offsetYRatio * metrics.heightPixels);
-        }
+        @Override
+        public boolean onTouch(View v, MotionEvent event) {
+            Config config = Config.get(v.getContext());
+            if (!config.enabled) {
+                return forward(v, event);
+            }
 
-        boolean onTouch(View v, MotionEvent event) {
-            config = Config.get(v.getContext());
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
-                    downRawX = event.getRawX();
-                    downRawY = event.getRawY();
-                    baseTranslationX = v.getTranslationX();
-                    baseTranslationY = v.getTranslationY();
+                    tracking = true;
                     dragging = false;
-                    longFired = false;
-                    v.setPressed(true);
-                    if (config.longPressLock) {
-                        handler.postDelayed(longPressRunnable, 520);
-                    }
-                    return true;
+                    downAt = SystemClock.uptimeMillis();
+                    downX = event.getRawX();
+                    downY = event.getRawY();
+                    downViewX = event.getX();
+                    downViewY = event.getY();
+                    return forward(v, event);
 
-                case MotionEvent.ACTION_MOVE:
-                    float dx = event.getRawX() - downRawX;
-                    float dy = event.getRawY() - downRawY;
-                    if (!dragging && !config.locked
-                            && (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop)) {
-                        dragging = true;
-                        handler.removeCallbacks(longPressRunnable);
+                case MotionEvent.ACTION_MOVE: {
+                    if (!tracking) return forward(v, event);
+                    float dx = event.getRawX() - downX;
+                    float dy = event.getRawY() - downY;
+
+                    // 锁定位置：把坐标钉回按下点再转发，原生状态机照常跑，
+                    // 但球不会被拖走，边界自然也不会变
+                    if (config.locked && Math.hypot(dx, dy) > slop) {
+                        MotionEvent pinned = MotionEvent.obtain(event);
+                        pinned.offsetLocation(
+                                downViewX - event.getX(), downViewY - event.getY());
+                        boolean handled = forward(v, pinned);
+                        pinned.recycle();
+                        return handled;
                     }
-                    if (dragging) {
-                        DisplayMetrics metrics = v.getResources().getDisplayMetrics();
-                        float limitX = metrics.widthPixels * 0.5f;
-                        float limitY = metrics.heightPixels * 0.5f;
-                        v.setTranslationX(Config.clamp(baseTranslationX + dx, -limitX, limitX));
-                        v.setTranslationY(Config.clamp(baseTranslationY + dy, -limitY, limitY));
+
+                    // 按住超过长按阈值后才开始移动 = 墨墨自己的「长按拖动」
+                    // 位置、边界、吸附全部交还原生，模块不参与，避免把球拖出屏幕
+                    if (!dragging && !config.locked
+                            && SystemClock.uptimeMillis() - downAt >= longPressTimeout
+                            && Math.hypot(dx, dy) > slop) {
+                        dragging = true;
+                    }
+                    return forward(v, event);
+                }
+
+                case MotionEvent.ACTION_UP: {
+                    if (!tracking) return forward(v, event);
+                    boolean wasDragging = dragging;
+                    float dx = event.getRawX() - downX;
+                    float dy = event.getRawY() - downY;
+                    reset();
+
+                    if (wasDragging) {
+                        // 拖动结束，抬手交给原生做边缘吸附
+                        return forward(v, event);
+                    }
+
+                    // 拦下这次抬手：先给原生补一个 CANCEL 清理按压态，原生动作就不会触发
+                    cancelNative(v, event);
+                    if (Math.hypot(dx, dy) <= slop * 1.5f) {
+                        runAction(v, 0, config);
+                    } else {
+                        runAction(v, direction(dx, dy), config);
                     }
                     return true;
+                }
 
                 case MotionEvent.ACTION_CANCEL:
-                    handler.removeCallbacks(longPressRunnable);
-                    v.setPressed(false);
-                    if (dragging) commitPosition(v);
-                    return true;
+                    reset();
+                    return forward(v, event);
 
-                case MotionEvent.ACTION_UP:
-                    handler.removeCallbacks(longPressRunnable);
-                    v.setPressed(false);
-                    if (dragging) {
-                        commitPosition(v);
-                        return true;
-                    }
-                    if (longFired) return true;
+                default:
+                    return forward(v, event);
+            }
+        }
 
-                    float upDx = event.getRawX() - downRawX;
-                    float upDy = event.getRawY() - downRawY;
-                    if (Math.hypot(upDx, upDy) < touchSlop * 1.2f) {
-                        runAction(v, 0);
-                    } else if (Math.abs(upDx) > Math.abs(upDy)) {
-                        runAction(v, upDx > 0 ? 4 : 3);
-                    } else {
-                        runAction(v, upDy > 0 ? 2 : 1);
-                    }
-                    return true;
+        /** 原样交给墨墨：有原生 listener 就走它，没有则返回 false 让 View.onTouchEvent 处理。 */
+        private boolean forward(View v, MotionEvent event) {
+            if (original != null) {
+                try {
+                    return original.onTouch(v, event);
+                } catch (Throwable ignored) {
+                }
             }
             return false;
         }
 
-        private void commitPosition(View v) {
-            DisplayMetrics metrics = v.getResources().getDisplayMetrics();
-            float tx = v.getTranslationX();
-            float ty = v.getTranslationY();
-            if (metrics.widthPixels > 0) {
-                config.offsetXRatio = tx / metrics.widthPixels;
+        /** 给原生补发 CANCEL，清掉按下态 / 正在播放的按压动画，同时通知它手势结束。 */
+        private void cancelNative(View v, MotionEvent event) {
+            MotionEvent cancel = null;
+            try {
+                cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                if (original != null) original.onTouch(v, cancel);
+                v.onTouchEvent(cancel);
+            } catch (Throwable ignored) {
+            } finally {
+                if (cancel != null) cancel.recycle();
             }
-            if (metrics.heightPixels > 0) {
-                config.offsetYRatio = ty / metrics.heightPixels;
-            }
-            config.save(v.getContext());
         }
 
-        private void runAction(View v, int gestureIndex) {
+        private void reset() {
+            tracking = false;
+            dragging = false;
+        }
+
+        private int direction(float dx, float dy) {
+            if (Math.abs(dx) > Math.abs(dy)) return dx > 0 ? 4 : 3;
+            return dy > 0 ? 2 : 1;
+        }
+
+        private void runAction(View v, int gestureIndex, Config config) {
             Activity activity = Util.findActivity(v.getContext());
             if (activity == null) return;
 
             boolean answerShown = ActionExecutor.isAnswerShown(activity);
             String action = config.actionFor(answerShown, gestureIndex);
-            Log.d(TAG, "gesture=" + Config.GESTURE_LABELS[gestureIndex]
-                    + " answerShown=" + answerShown + " action=" + action);
+            XposedLog.d("gesture=" + Config.GESTURE_LABELS[gestureIndex]
+                    + " 已显示答案=" + answerShown + " 动作=" + action);
             if (Config.ACTION_NONE.equals(action)) return;
 
             boolean ok = ActionExecutor.execute(activity, action, v);
-            if (ok && config.haptic) {
-                v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
-            } else if (!ok) {
+            if (ok) {
+                if (config.haptic) {
+                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+                }
+            } else {
                 ActionExecutor.toast(activity, "当前页面没有可用的「" + label(action) + "」控件");
             }
         }
