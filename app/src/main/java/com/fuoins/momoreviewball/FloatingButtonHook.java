@@ -350,15 +350,90 @@ public final class FloatingButtonHook {
                 }
             }
             XposedLog.i(sb.toString());
+            dumpTouchChain(view);
+            dumpMethods(view);
         });
 
         // 复习页一出现就把日志落盘，设置页注入失败时也能从文件里拿到
         view.postDelayed(() -> Diag.flush(view.getContext()), 1500L);
     }
 
+    /**
+     * 触摸链诊断：球的每一层祖先是否自己处理触摸、有没有 listener、Activity 是否接管。
+     *
+     * <p>实测球的 {@code dispatchTouchEvent} 返回 false、{@code OnTouchListener} 为 null，
+     * 说明手势根本不在球控件里。这条链用来找出真正接手势的那一层。
+     */
+    private static void dumpTouchChain(View view) {
+        StringBuilder sb = new StringBuilder("触摸链（从球往上）：");
+        View current = view;
+        for (int i = 0; i < 8 && current != null; i++) {
+            sb.append("\n  [").append(i).append("] ").append(current.getClass().getName())
+                    .append(' ').append(current.getWidth()).append('x').append(current.getHeight())
+                    .append(" clickable=").append(current.isClickable())
+                    .append(" listener=").append(readTouchListener(current) != null)
+                    .append(" dispatch=").append(declares(current.getClass(), "dispatchTouchEvent"))
+                    .append(" intercept=").append(declares(current.getClass(), "onInterceptTouchEvent"))
+                    .append(" touch=").append(declares(current.getClass(), "onTouchEvent"));
+            ViewParent parent = current.getParent();
+            current = parent instanceof View ? (View) parent : null;
+        }
+        try {
+            Activity activity = Util.findActivity(view.getContext());
+            if (activity != null) {
+                sb.append("\n  Activity ").append(activity.getClass().getName())
+                        .append(" dispatch=").append(declares(activity.getClass(), "dispatchTouchEvent"))
+                        .append(" keyDown=").append(declares(activity.getClass(), "onKeyDown"))
+                        .append(" keyShortcut=").append(declares(activity.getClass(), "onKeyShortcut"));
+            }
+        } catch (Throwable ignored) {
+        }
+        XposedLog.i(sb.toString());
+    }
+
+    /** 这个类（含父类）有没有自己声明某个方法。 */
+    private static boolean declares(Class<?> clazz, String name) {        for (Class<?> c = clazz; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                for (Method method : c.getDeclaredMethods()) {
+                    if (method.getName().equals(name)) return true;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 把球和子 View 自己声明的方法名写进日志。
+     *
+     * <p>{@code MMFloatingButton} 这个类名没被混淆，方法名很可能也是可读的——
+     * 万一手势入口藏在某个 public 方法里，看名字就能找到。
+     */
+    private static void dumpMethods(View view) {
+        logMethods("球类", view);
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                logMethods("子View[" + i + "]", group.getChildAt(i));
+            }
+        }
+    }
+
+    private static void logMethods(String tag, View view) {
+        StringBuilder sb = new StringBuilder(tag).append(' ').append(view.getClass().getName())
+                .append(" 声明的方法：");
+        try {
+            for (Method method : view.getClass().getDeclaredMethods()) {
+                sb.append(method.getName()).append('/')
+                        .append(method.getParameterTypes().length).append(' ');
+            }
+        } catch (Throwable ignored) {
+        }
+        XposedLog.i(sb.toString());
+    }
+
     /** 设置页拖动大小滑杆时调用：把新比例应用到还活着的球上。 */
-    static void applyScale() {
-        synchronized (ATTACHED) {
+    static void applyScale() {        synchronized (ATTACHED) {
             for (Iterator<WeakReference<View>> it = ATTACHED.iterator(); it.hasNext(); ) {
                 View view = it.next().get();
                 if (view == null) {
@@ -629,9 +704,6 @@ public final class FloatingButtonHook {
             int h = view.getHeight();
             if (w <= 0 || h <= 0) return false;
 
-            float cx = w / 2f;
-            float cy = h / 2f;
-            // 真球只占控件中间一半，滑距按控件尺寸取，稳过原生的 slop
             float dist = Math.min(w, h) * 0.34f;
             float dx = 0f;
             float dy = 0f;
@@ -665,15 +737,39 @@ public final class FloatingButtonHook {
             injecting = true;
             try {
                 view.setHapticFeedbackEnabled(false);
-                boolean consumed = sendSequence(true, downAt, cx, cy, dx, dy, screen);
-                if (!consumed && original != null) {
-                    // 容器没吃这串事件（手势听在子 View 或 listener 上），直接投给原生 listener
-                    consumed = sendSequence(false, downAt, cx, cy, dx, dy, screen);
-                    XposedLog.i("回放：容器未消费，已改投原生 OnTouchListener");
+
+                // ① 先给球控件本身。日志实测：球的 dispatchTouchEvent 返回 false、
+                //    OnTouchListener 为 null——球根本不参与常驻触摸。
+                String where = "球控件";
+                boolean consumed = sendSequence(event -> view.dispatchTouchEvent(event),
+                        w / 2f, h / 2f, dx, dy, screen, downAt);
+
+                // ② 球自己不吃 DOWN，说明墨墨的球手势是「悬浮层」统一处理的，写在
+                //    页面/Activity 的 dispatchTouchEvent 里。从 Activity 层重新走一遍
+                //    完整分发，等价于用户真的在球上滑了一下。
+                //    DOWN 没人接就立刻发 CANCEL，绝不会把这次注入变成一次页面点击。
+                if (!consumed) {
+                    Activity activity = Util.findActivity(view.getContext());
+                    if (activity != null) {
+                        // Activity 收到的是「窗口坐标」，不是屏幕坐标：状态栏存在时两者
+                        // 差一截，直接拿屏幕坐标会点偏。这里分开算，raw 仍补回屏幕坐标。
+                        int[] win = new int[2];
+                        try {
+                            view.getLocationInWindow(win);
+                        } catch (Throwable ignored) {
+                            win[0] = screen[0];
+                            win[1] = screen[1];
+                        }
+                        int[] rawOffset = {screen[0] - win[0], screen[1] - win[1]};
+                        where = "Activity 分发";
+                        consumed = sendSequence(event -> activity.dispatchTouchEvent(event),
+                                win[0] + w / 2f, win[1] + h / 2f, dx, dy, rawOffset, downAt);
+                    }
                 }
+
                 XposedLog.i("已回放原生球手势：方向=" + dir + "（" + dirName(dir) + "），滑距="
-                        + Math.round(dist) + "，原生消费=" + consumed
-                        + "，屏幕位置=(" + screen[0] + ',' + screen[1] + ')');
+                        + Math.round(dist) + "，投递=" + where + "，原生消费=" + consumed
+                        + "，球屏幕位置=(" + screen[0] + ',' + screen[1] + ')');
                 return true;
             } catch (Throwable t) {
                 XposedLog.w("回放原生球手势失败", t);
@@ -684,14 +780,22 @@ public final class FloatingButtonHook {
             }
         }
 
+        /** 事件投递目标：球控件或 Activity 的分发入口。 */
+        private interface Sink {
+            boolean dispatch(MotionEvent event);
+        }
+
         /**
          * 发一整串 DOWN → MOVE × n → UP。
          *
-         * @param dispatch true 走 {@code dispatchTouchEvent}；false 直接调原生 listener
+         * <p>DOWN 没人接就补一个 CANCEL 收场：否则后续 MOVE/UP 会冒泡到页面，
+         * 变成一次「点击屏幕显示答案」。
+         *
+         * @param offset 目标在屏幕上的左上角（null 表示坐标本身就是屏幕坐标）
          * @return DOWN 是否被消费
          */
-        private boolean sendSequence(boolean dispatch, long downAt, float cx, float cy,
-                                     float dx, float dy, int[] screen) {
+        private boolean sendSequence(Sink sink, float cx, float cy,
+                                     float dx, float dy, int[] offset, long downAt) {
             int steps = 8;
             boolean downHandled = false;
             for (int i = 0; i <= steps + 1; i++) {
@@ -701,20 +805,27 @@ public final class FloatingButtonHook {
                 float y = cy + dy * ratio;
                 int action = i == 0 ? MotionEvent.ACTION_DOWN
                         : (i > steps ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE);
-                MotionEvent event = obtain(downAt, at, action, x, y, screen);
-                boolean handled;
+                MotionEvent event = obtain(downAt, at, action, x, y, offset);
+                boolean handled = false;
                 try {
-                    if (dispatch) {
-                        handled = view.dispatchTouchEvent(event);
-                    } else {
-                        handled = original != null && original.onTouch(view, event);
-                    }
-                } catch (Throwable t) {
-                    handled = false;
+                    handled = sink.dispatch(event);
+                } catch (Throwable ignored) {
                 } finally {
                     event.recycle();
                 }
-                if (i == 0) downHandled = handled;
+                if (i == 0) {
+                    downHandled = handled;
+                    if (!handled) {
+                        MotionEvent cancel = obtain(downAt, at + 16,
+                                MotionEvent.ACTION_CANCEL, x, y, offset);
+                        try {
+                            sink.dispatch(cancel);
+                        } catch (Throwable ignored) {
+                        }
+                        cancel.recycle();
+                        return false;
+                    }
+                }
             }
             return downHandled;
         }
@@ -723,13 +834,13 @@ public final class FloatingButtonHook {
          * 造一个「看起来像真手指」的事件。
          *
          * <p>{@code obtain(...)} 里的 x/y 是控件内坐标，raw 默认与之相同；
-         * 调 {@code offsetLocation(屏幕左上角)} 后 raw 变成屏幕坐标，而 x/y 不变，
+         * 调 {@code offsetLocation(目标屏幕左上角)} 后 raw 变成屏幕坐标，而 x/y 不变，
          * 和真实触摸事件的结构完全一致。
          */
         private MotionEvent obtain(long downAt, long at, int action,
-                                   float x, float y, int[] screen) {
+                                   float x, float y, int[] offset) {
             MotionEvent event = MotionEvent.obtain(downAt, at, action, x, y, 0);
-            event.offsetLocation(screen[0], screen[1]);
+            if (offset != null) event.offsetLocation(offset[0], offset[1]);
             try {
                 event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
             } catch (Throwable ignored) {
