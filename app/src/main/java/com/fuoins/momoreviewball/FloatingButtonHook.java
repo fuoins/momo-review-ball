@@ -180,10 +180,24 @@ public final class FloatingButtonHook {
         XposedLog.i("已代理自带悬浮球，原有 listener=" + original);
 
         // 球体几何诊断：控件本身不是正方形，真实球的区域靠这段日志确认
-        view.post(() -> XposedLog.i("球控件尺寸 " + view.getWidth() + "x" + view.getHeight()
-                + "，子View=" + (view instanceof ViewGroup
-                        ? ((ViewGroup) view).getChildCount() : -1)
-                + "，背景=" + view.getBackground()));
+        view.post(() -> {
+            StringBuilder sb = new StringBuilder("球控件尺寸 ");
+            sb.append(view.getWidth()).append('x').append(view.getHeight());
+            sb.append("，背景=").append(view.getBackground());
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                sb.append("，子View=").append(group.getChildCount());
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    View child = group.getChildAt(i);
+                    sb.append(" [").append(i).append(']')
+                            .append(child.getClass().getSimpleName()).append(' ')
+                            .append(child.getWidth()).append('x').append(child.getHeight())
+                            .append(" @(").append(child.getLeft()).append(',')
+                            .append(child.getTop()).append(')');
+                }
+            }
+            XposedLog.i(sb.toString());
+        });
 
         // 复习页一出现就把日志落盘，设置页注入失败时也能从文件里拿到
         view.postDelayed(() -> Diag.flush(view.getContext()), 1500L);

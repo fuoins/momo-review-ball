@@ -14,6 +14,8 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayDeque;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * 把模块配置直接铺进墨墨的「手势悬浮球」设置页
@@ -30,6 +32,9 @@ public final class SettingsInjector {
 
     /** 页面是异步铺开的，注入要等；重试这么多次还不行才退回浮动入口。 */
     private static final int MAX_ATTEMPTS = 10;
+
+    /** onResume 和 onWindowFocusChanged 会各触发一次，避免两条重试链并行。 */
+    private static final Map<Activity, Boolean> STARTED = new WeakHashMap<>();
 
     private SettingsInjector() {
     }
@@ -55,6 +60,12 @@ public final class SettingsInjector {
         if (!(content instanceof ViewGroup)) return;
         final ViewGroup root = (ViewGroup) content;
         if (root.findViewWithTag(TAG) != null) return;
+
+        synchronized (STARTED) {
+            if (STARTED.containsKey(activity)) return;
+            STARTED.put(activity, Boolean.TRUE);
+        }
+
         schedule(activity, root, 0);
     }
 
@@ -213,26 +224,29 @@ public final class SettingsInjector {
      * 上面是原生列表、下面是模块配置，一起滚动。
      */
     private static boolean wrapRecycler(Activity activity, View recycler, View panel) {
-        ViewGroup parent = (ViewGroup) recycler.getParent();
-        if (parent == null) return false;
-        // 只处理能直接给子 View 定绝对位置的容器，约束布局硬塞会跑到左上角
-        if (!(parent instanceof FrameLayout) && !(parent instanceof LinearLayout)) {
-            XposedLog.w("列表父容器是 " + parent.getClass().getName() + "，暂不支持包裹");
+        if (!(recycler.getParent() instanceof ViewGroup)) return false;
+        final ViewGroup parent = (ViewGroup) recycler.getParent();
+
+        int index = parent.indexOfChild(recycler);
+        int top = recycler.getTop();
+        int limit = availableBottom(parent, recycler);
+        int height = limit - top;
+        if (height <= 0) {
+            XposedLog.d("列表可用高度算不出来：parent=" + parent.getWidth() + "x"
+                    + parent.getHeight() + " top=" + top + " limit=" + limit);
             return false;
         }
 
-        int index = parent.indexOfChild(recycler);
-        int top = recycler.getTop() - parent.getPaddingTop();
-        int limit = availableBottom(parent, recycler);
-        int height = limit - recycler.getTop();
-        if (height <= 0) {
-            XposedLog.d("列表可用高度算不出来：parent=" + parent.getWidth() + "x"
-                    + parent.getHeight() + " top=" + recycler.getTop() + " limit=" + limit);
-            return false;
-        }
+        // 列表自己的 LayoutParams 就是父容器认识的类型（FrameLayout / ConstraintLayout /
+        // RelativeLayout 都一样）。直接把它交给 ScrollView 复用，横向约束、外边距、
+        // 垂直定位规则全部原样保留，只改高度——不用给每种容器各写一套定位逻辑。
+        ViewGroup.LayoutParams inherited = recycler.getLayoutParams();
 
         parent.removeView(recycler);
         stopNestedScroll(recycler);
+        // 换了父容器，列表必须换成 LinearLayout 的 params，否则约束规则会被误用
+        recycler.setLayoutParams(new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout column = new LinearLayout(activity);
         column.setOrientation(LinearLayout.VERTICAL);
@@ -247,19 +261,19 @@ public final class SettingsInjector {
         scroll.addView(column, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        ViewGroup.LayoutParams lp;
-        if (parent instanceof FrameLayout) {
-            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, height);
-            flp.topMargin = Math.max(0, top);
-            lp = flp;
+        int insertAt = Math.max(0, Math.min(index, parent.getChildCount()));
+        if (inherited != null) {
+            inherited.height = height;
+            scroll.setLayoutParams(inherited);
+            parent.addView(scroll, insertAt);
         } else {
-            lp = new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height);
+            parent.addView(scroll, insertAt, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, height));
         }
-        parent.addView(scroll, Math.max(0, Math.min(index, parent.getChildCount())), lp);
 
         XposedLog.i("已自建滚动区承载配置，top=" + top + " height=" + height
-                + "，父容器=" + parent.getClass().getSimpleName());
+                + "，父容器=" + parent.getClass().getSimpleName()
+                + "，沿用=" + (inherited == null ? "默认" : inherited.getClass().getSimpleName()));
         return true;
     }
 

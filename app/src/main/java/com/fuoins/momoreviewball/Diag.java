@@ -4,7 +4,6 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
@@ -176,12 +175,12 @@ final class Diag {
     }
 
     private static String moduleVersion(Context ctx) {
+        // 模块是普通应用、代码却跑在墨墨进程里，跨包查询会被包可见性挡住，
+        // 直接用编译期常量最稳
         try {
-            PackageInfo info = ctx.getPackageManager()
-                    .getPackageInfo("com.fuoins.momoreviewball", 0);
-            return info.versionName + " (" + info.versionCode + ")";
+            return BuildConfig.VERSION_NAME + " (" + BuildConfig.VERSION_CODE + ")";
         } catch (Throwable t) {
-            return "未安装/读不到";
+            return "?";
         }
     }
 
