@@ -606,9 +606,9 @@ public final class FloatingButtonHook {
                     ActionExecutor.toast(activity,
                             "「熟知」需要先在 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
                 } else if (Config.ACTION_PEEK.equals(action)) {
-                    // 官方「瞄一眼」只存在于拼写模式的输入条上
+                    // 官方「瞄一眼」是复习页的例句提示，走 Ctrl+O 快捷键
                     ActionExecutor.toast(activity,
-                            "「瞄一眼」要在拼写模式用：请把复习方式切到手写或键盘");
+                            "「瞄一眼」没有响应：请在复习页面使用（需要页面已加载完单词）");
                 } else {
                     ActionExecutor.toast(activity, "当前页面没有可用的「" + label(action) + "」控件");
                 }

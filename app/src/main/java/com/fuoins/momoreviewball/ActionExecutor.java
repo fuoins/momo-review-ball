@@ -3,6 +3,7 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -124,16 +125,83 @@ public final class ActionExecutor {
     /**
      * 官方「瞄一眼」。
      *
-     * <p>墨墨自己在拼写模式（手写 / 键盘输入）的输入条右侧放了两个眼睛按钮，
-     * 资源名是 {@code btn_peek_handwriting} / {@code btn_peek_keyboard}，
-     * contentDescription 就叫「瞄一眼」。这里只点官方控件，
-     * 不再像旧版本那样自己画一层气泡去猜单词——那句话本来就不算「瞄一眼」。
+     * <p>墨墨的「瞄一眼」不是拼写模式那两个眼睛按钮：它在复习页随时可用，
+     * 触发后会弹出一条例句提示。官方同时把它挂在了快捷键 Ctrl+O 上
+     * （见应用内「快捷键帮助」），所以这里优先点页面上可见的「瞄一眼」控件，
+     * 找不到就按官方快捷键发送 Ctrl+O，走的是应用自己的实现，不自己造效果。
      */
     private static boolean peek(Activity activity) {
-        if (clickId(activity, "btn_peek_handwriting", "btn_peek_keyboard")) return true;
-        if (clickByDescription(activity, new String[]{"瞄一眼"})) return true;
-        if (clickText(activity, new String[]{"瞄一眼"}, true)) return true;
-        return clickByIdKeyword(activity, new String[]{"peek"});
+        if (clickPeekControl(activity)) return true;
+        boolean ok = sendPeekShortcut(activity);
+        if (!ok) {
+            XposedLog.w("瞄一眼：页面没有「瞄一眼」控件，Ctrl+O 也没被消费；可见文案="
+                    + dumpTexts(activity));
+        }
+        return ok;
+    }
+
+    /** 页面上如果直接有「瞄一眼」控件（文字或 contentDescription），优先点它。 */
+    private static boolean clickPeekControl(Activity activity) {
+        ArrayList<View> views = new ArrayList<>();
+        collectViews(activity.getWindow().getDecorView(), views);
+
+        for (View view : views) {
+            if (!view.isShown()) continue;
+            CharSequence text = view instanceof TextView ? ((TextView) view).getText() : null;
+            CharSequence desc = view.getContentDescription();
+            if (containsPeek(text) || containsPeek(desc)) {
+                if (clickView(activity, view)) {
+                    XposedLog.i("瞄一眼：点击页面控件 " + view.getClass().getSimpleName());
+                    return true;
+                }
+            }
+        }
+        for (View view : views) {
+            if (!view.isShown()) continue;
+            int id = view.getId();
+            if (id == View.NO_ID) continue;
+            String name;
+            try {
+                name = activity.getResources().getResourceEntryName(id);
+            } catch (Throwable t) {
+                continue;
+            }
+            if (name == null) continue;
+            name = name.toLowerCase(Locale.ROOT);
+            if (name.contains("peek") || name.contains("glance")) {
+                if (clickView(activity, view)) {
+                    XposedLog.i("瞄一眼：点击 " + name);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static boolean containsPeek(CharSequence text) {
+        return text != null && text.toString().contains("瞄一眼");
+    }
+
+    /**
+     * 官方快捷键 Ctrl+O = 瞄一眼。直接交给 Activity 的事件分发，
+     * 应用自己的 onKeyDown / dispatchKeyEvent 会执行和球上手势完全相同的逻辑。
+     */
+    private static boolean sendPeekShortcut(Activity activity) {
+        try {
+            long now = SystemClock.uptimeMillis();
+            int meta = KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON;
+            KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                    KeyEvent.KEYCODE_O, 0, meta);
+            KeyEvent up = new KeyEvent(now, now + 40, KeyEvent.ACTION_UP,
+                    KeyEvent.KEYCODE_O, 0, meta);
+            boolean consumed = activity.dispatchKeyEvent(down);
+            consumed |= activity.dispatchKeyEvent(up);
+            XposedLog.i("瞄一眼：已发送官方快捷键 Ctrl+O，consumed=" + consumed);
+            return consumed;
+        } catch (Throwable t) {
+            XposedLog.w("瞄一眼：Ctrl+O 发送失败", t);
+            return false;
+        }
     }
 
     private static boolean previous(Activity activity) {

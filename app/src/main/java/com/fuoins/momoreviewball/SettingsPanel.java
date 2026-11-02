@@ -95,8 +95,8 @@ public final class SettingsPanel {
                 usesFamiliar(config) ? View.VISIBLE : View.GONE);
 
         final TextView peekNotice = notice(activity,
-                "「瞄一眼」点的是墨墨拼写模式输入条右侧的眼睛按钮（手写 / 键盘两种模式都有），"
-                        + "普通复习模式没有这个按钮。");
+                "「瞄一眼」调用墨墨官方的瞄一眼（复习页快捷键 Ctrl+O），会弹出例句提示，"
+                        + "不需要拼写模式；快捷键失效时会退回点击页面上的「瞄一眼」控件。");
         final Runnable syncPeek = () -> peekNotice.setVisibility(
                 containsAction(config.before, Config.ACTION_PEEK) ? View.VISIBLE : View.GONE);
 
