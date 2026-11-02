@@ -10,8 +10,8 @@ android {
         applicationId "com.fuoins.momoreviewball"
         minSdk 24
         targetSdk 34
-        versionCode 41
-        versionName "3.1.9"
+        versionCode 42
+        versionName "3.2.0"
     }
 
     signingConfigs {

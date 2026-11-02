@@ -82,7 +82,9 @@ final class BallPainter {
             boolean active = highlight == gesture && progress > 0f;
             boolean dim = highlight != 0 && !active;
 
-            arcPaint.setColor(idle ? IDLE_COLOR : SettingsPanel.colorOf(action));
+            // 没配动作时色带保持浅灰弱化；但用户若专门给「无操作」设了颜色，也照样生效
+            arcPaint.setColor(idle && !config.hasCustomColor(action)
+                    ? IDLE_COLOR : config.colorOf(action));
             arcPaint.setAlpha(dim ? 96 : 255);
             arcPaint.setStrokeWidth(active ? bandWidth * (1f + 0.14f * progress) : bandWidth);
 
@@ -99,8 +101,7 @@ final class BallPainter {
         if (label.isEmpty()) return;
 
         float badgeRadius = radius * (highlight > 0 ? 0.44f : 0.40f);
-        badgePaint.setColor(Config.ACTION_NONE.equals(action)
-                ? NONE_COLOR : SettingsPanel.colorOf(action));
+        badgePaint.setColor(config.colorOf(action));
         canvas.drawCircle(cx, cy, badgeRadius, badgePaint);
 
         // 一圈白边，把中心和四周的色带分开，颜色再接近也看得清

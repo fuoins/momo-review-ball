@@ -58,7 +58,7 @@ public final class Config {
 
     /** 悬浮球自定义大小范围，1.0 = 墨墨原生尺寸。 */
     public static final float SCALE_MIN = 0.6f;
-    public static final float SCALE_MAX = 1.5f;
+    public static final float SCALE_MAX = 2.0f;
 
     /** 手势顺序：单击、上滑、下滑、左滑、右滑 */
     public static final String[] GESTURE_LABELS = {"单击", "上滑", "下滑", "左滑", "右滑"};
@@ -77,6 +77,8 @@ public final class Config {
     public float scale = 1f;
     public String[] before = DEFAULT_BEFORE.clone();
     public String[] after = DEFAULT_AFTER.clone();
+    /** 用户改过的动作颜色：key 为动作，value 为 ARGB；没改过的走 {@link #defaultColorOf}。 */
+    public final java.util.LinkedHashMap<String, Integer> colors = new java.util.LinkedHashMap<>();
 
     private static volatile Config cached;
     /** 每次保存 +1，悬浮球据此判断配色/映射是否变了，不用等下一个轮询周期。 */
@@ -128,6 +130,57 @@ public final class Config {
         scale = 1f;
         before = DEFAULT_BEFORE.clone();
         after = DEFAULT_AFTER.clone();
+        colors.clear();
+    }
+
+    /** 动作的默认配色（墨墨自带的那套）。 */
+    public static int defaultColorOf(String key) {
+        switch (key) {
+            case ACTION_KNOW:
+                return 0xFF4CAF50;   // 绿
+            case ACTION_VAGUE:
+                return 0xFFF2A33C;   // 橙
+            case ACTION_FORGET:
+                return 0xFFE53935;   // 红
+            case ACTION_FAMILIAR:
+                return 0xFF00897B;   // 青
+            case ACTION_PRONOUNCE:
+                return 0xFF8E44AD;   // 紫
+            case ACTION_PREV:
+                return 0xFF9E9E9E;   // 灰
+            case ACTION_SHOW:
+                return 0xFF546E7A;   // 蓝灰
+            case ACTION_PEEK:
+                return 0xFF3E8ED0;   // 蓝
+            default:
+                return 0xFFB9C0CC;   // 无操作
+        }
+    }
+
+    /** 当前生效的颜色：用户设过就用用户的，否则用默认。 */
+    public int colorOf(String key) {
+        Integer custom = colors.get(key);
+        return custom == null ? defaultColorOf(key) : custom;
+    }
+
+    public boolean hasCustomColor(String key) {
+        return colors.containsKey(key);
+    }
+
+    public void setColor(String key, int color) {
+        if (color == defaultColorOf(key)) {
+            colors.remove(key);
+        } else {
+            colors.put(key, color | 0xFF000000);
+        }
+    }
+
+    public void resetColor(String key) {
+        colors.remove(key);
+    }
+
+    public void resetColors() {
+        colors.clear();
     }
 
     public String actionFor(boolean answerShown, int gestureIndex) {
@@ -173,6 +226,13 @@ public final class Config {
             o.put("schema", SCHEMA);
             o.put("before", new JSONArray(Arrays.asList(before)));
             o.put("after", new JSONArray(Arrays.asList(after)));
+            if (!colors.isEmpty()) {
+                JSONObject c = new JSONObject();
+                for (java.util.Map.Entry<String, Integer> e : colors.entrySet()) {
+                    c.put(e.getKey(), (int) e.getValue());
+                }
+                o.put("colors", c);
+            }
         } catch (Throwable ignored) {
         }
         return o.toString();
@@ -188,6 +248,17 @@ public final class Config {
             c.scale = clamp((float) o.optDouble("scale", 1.0), SCALE_MIN, SCALE_MAX);
             c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE, false);
             c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER, true);
+            JSONObject colors = o.optJSONObject("colors");
+            if (colors != null) {
+                java.util.Iterator<String> it = colors.keys();
+                while (it.hasNext()) {
+                    String key = it.next();
+                    if (!isValidAction(key)) continue;
+                    int value = colors.optInt(key, 0);
+                    if ((value >>> 24) == 0) value |= 0xFF000000;
+                    if (value != defaultColorOf(key)) c.colors.put(key, value);
+                }
+            }
 
             // 3.0.x 把「瞄一眼」整条拿掉时，默认配置里的下滑被折成了「无操作」。
             // 这里只认「其余四项还是原样」的默认形态，把下滑补回瞄一眼；

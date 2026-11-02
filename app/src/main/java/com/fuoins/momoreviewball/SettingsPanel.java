@@ -41,28 +41,9 @@ public final class SettingsPanel {
     private SettingsPanel() {
     }
 
-    /** 动作名 → 墨墨自带配色。 */
+    /** 动作名 → 墨墨自带配色（用户自定义过则以配置里的为准）。 */
     static int colorOf(String key) {
-        switch (key) {
-            case Config.ACTION_KNOW:
-                return 0xFF4CAF50;   // 认识 · 绿
-            case Config.ACTION_VAGUE:
-                return 0xFFF2A33C;   // 模糊 · 橙
-            case Config.ACTION_FORGET:
-                return 0xFFE53935;   // 忘记 · 红
-            case Config.ACTION_FAMILIAR:
-                return 0xFF00897B;   // 熟知 · 青
-            case Config.ACTION_PRONOUNCE:
-                return 0xFF8E44AD;   // 发音 · 紫
-            case Config.ACTION_PREV:
-                return 0xFF9E9E9E;   // 返回上一个单词 · 灰
-            case Config.ACTION_SHOW:
-                return 0xFF546E7A;   // 显示单词 · 蓝灰
-            case Config.ACTION_PEEK:
-                return 0xFF3E8ED0;   // 瞄一眼 · 蓝
-            default:
-                return 0xFFBDBDBD;   // 无操作
-        }
+        return Config.defaultColorOf(key);
     }
 
     /** 生成可以塞进任意页面的一块配置区域。 */
@@ -131,6 +112,8 @@ public final class SettingsPanel {
             config.enabled = checked;
             config.save(activity);
         }));
+
+        card.addView(colorSection(activity, config, reloaders));
 
         Button reset = new Button(activity);
         reset.setText("恢复默认设置");
@@ -299,7 +282,7 @@ public final class SettingsPanel {
         box.addView(head);
 
         SeekBar bar = new SeekBar(activity);
-        bar.setMax(90);
+        bar.setMax(Math.round((Config.SCALE_MAX - Config.SCALE_MIN) * 100f));
         LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         barLp.topMargin = Util.dp(activity, 4);
@@ -337,13 +320,170 @@ public final class SettingsPanel {
         // 初始状态 + 「恢复默认」时回到原位
         Runnable reload = () -> {
             int progress = Math.round((config.scale - Config.SCALE_MIN) * 100f);
-            bar.setProgress(Config.clamp(progress, 0, 90));
+            bar.setProgress(Config.clamp(progress, 0, bar.getMax()));
             value.setText(Math.round(config.scale * 100) + "%");
             preview.setScale(config.scale);
         };
         reload.run();
         reloaders.add(reload);
         return box;
+    }
+
+    /**
+     * 动作颜色：每个动作一个色块，点开取色图，球面四向色带和中心圆点跟着变。
+     *
+     * <p>颜色存在 {@link Config#colors} 里，没改过的动作仍用墨墨自带配色，
+     * 所以升级模块不会把默认配色写死成一份快照。
+     */
+    private static View colorSection(final Activity activity, final Config config,
+                                     List<Runnable> reloaders) {
+        LinearLayout box = new LinearLayout(activity);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        boxLp.topMargin = Util.dp(activity, 20);
+        box.setLayoutParams(boxLp);
+
+        LinearLayout head = new LinearLayout(activity);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView title = new TextView(activity);
+        title.setText("动作颜色");
+        title.setTextColor(NAVY);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        title.getPaint().setFakeBoldText(true);
+        title.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(title);
+
+        TextView resetAll = new TextView(activity);
+        resetAll.setText("全部恢复默认");
+        resetAll.setTextColor(NAVY);
+        resetAll.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+        resetAll.setPadding(Util.dp(activity, 8), Util.dp(activity, 4), 0, Util.dp(activity, 4));
+        head.addView(resetAll);
+        box.addView(head);
+
+        box.addView(hint(activity,
+                "点色块打开取色图：球面的四向色带和中心圆点会一起变色，取色器里也能直接输入 #RRGGBB。"));
+
+        final List<Runnable> refreshers = new ArrayList<>();
+        LinearLayout line = null;
+        for (int i = 0; i < Config.ACTION_KEYS.length; i++) {
+            if (i % 4 == 0) {
+                line = new LinearLayout(activity);
+                line.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams lineLp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                lineLp.topMargin = Util.dp(activity, i == 0 ? 6 : 2);
+                box.addView(line, lineLp);
+            }
+            LinearLayout.LayoutParams itemLp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            line.addView(colorItem(activity, config, Config.ACTION_KEYS[i], refreshers, reloaders), itemLp);
+        }
+
+        // 改色后除了色块，下拉框里的动作文字颜色也要跟着变，所以顺带跑一遍
+        // 其它配置项的 reload；用重入标记挡住 refreshAll 自己。
+        final boolean[] refreshing = {false};
+        final Runnable refreshAll = () -> {
+            if (refreshing[0]) return;
+            refreshing[0] = true;
+            try {
+                for (Runnable refresh : refreshers) refresh.run();
+                for (Runnable reload : new ArrayList<>(reloaders)) reload.run();
+            } finally {
+                refreshing[0] = false;
+            }
+        };
+        reloaders.add(refreshAll);
+        resetAll.setOnClickListener(v -> {
+            config.resetColors();
+            config.save(activity);
+            refreshAll.run();
+            ActionExecutor.toast(activity, "已恢复默认配色");
+        });
+        return box;
+    }
+
+    /** 单个动作的色块 + 名称。 */
+    private static View colorItem(final Activity activity, final Config config,
+                                  final String key, List<Runnable> refreshers,
+                                  List<Runnable> reloaders) {
+        LinearLayout item = new LinearLayout(activity);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER_HORIZONTAL);
+        item.setPadding(0, Util.dp(activity, 8), 0, Util.dp(activity, 4));
+
+        final View dot = new View(activity);
+        dot.setLayoutParams(new LinearLayout.LayoutParams(
+                Util.dp(activity, 40), Util.dp(activity, 40)));
+        item.addView(dot);
+
+        TextView name = new TextView(activity);
+        name.setText(shortActionLabel(key));
+        name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        name.setTextColor(SUB);
+        name.setGravity(Gravity.CENTER);
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams nameLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        nameLp.topMargin = Util.dp(activity, 5);
+        item.addView(name, nameLp);
+
+        final Runnable refresh = () -> {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setShape(GradientDrawable.OVAL);
+            bg.setColor(config.colorOf(key));
+            bg.setStroke(Math.max(1, Util.dp(activity, 1.4f)), 0x33000000);
+            dot.setBackground(bg);
+        };
+        refreshers.add(refresh);
+        refresh.run();
+
+        item.setOnClickListener(v -> ColorPickerDialog.show(activity, key, config.colorOf(key),
+                color -> {
+                    config.setColor(key, color);
+                    config.save(activity);
+                    // reloaders 里已经有 colorSection 自己的 refreshAll，
+                    // 它会重画所有色块并把下拉文字颜色一起刷新
+                    for (Runnable reload : new ArrayList<>(reloaders)) reload.run();
+                }));
+        return item;
+    }
+
+    /** 色块下面用短名，避免「返回上一个单词」在窄格里被截成省略号。 */
+    private static String shortActionLabel(String key) {
+        switch (key) {
+            case Config.ACTION_KNOW:
+                return "认识";
+            case Config.ACTION_VAGUE:
+                return "模糊";
+            case Config.ACTION_FORGET:
+                return "忘记";
+            case Config.ACTION_FAMILIAR:
+                return "熟知";
+            case Config.ACTION_PRONOUNCE:
+                return "发音";
+            case Config.ACTION_SHOW:
+                return "显示";
+            case Config.ACTION_PEEK:
+                return "瞄一眼";
+            case Config.ACTION_PREV:
+                return "返回";
+            default:
+                return "无操作";
+        }
+    }
+
+    /** 深色文字看白底、浅色文字看彩色，保证下拉项在自定义浅色下仍可读。 */
+    static int readable(int color) {
+        double lum = (0.299 * Color.red(color)
+                + 0.587 * Color.green(color)
+                + 0.114 * Color.blue(color)) / 255d;
+        return lum > 0.78 ? TEXT : color;
     }
 
     /** 和上方原生列表之间的一条细线，替代原来的卡片边界。 */
@@ -462,7 +602,7 @@ public final class SettingsPanel {
 
         final String[] options = Config.actionsFor(after);
         Spinner spinner = new Spinner(activity, Spinner.MODE_DROPDOWN);
-        ActionAdapter adapter = new ActionAdapter(activity, options);
+        ActionAdapter adapter = new ActionAdapter(activity, options, config);
         spinner.setAdapter(adapter);
         spinner.setSelection(Config.indexOf(options, config.actionFor(after, index)), false);
         spinner.setLayoutParams(new LinearLayout.LayoutParams(
@@ -485,8 +625,11 @@ public final class SettingsPanel {
         });
         row.addView(spinner);
 
-        reloaders.add(() -> spinner.setSelection(
-                Config.indexOf(options, config.actionFor(after, index)), false));
+        reloaders.add(() -> {
+            adapter.notifyDataSetChanged();
+            spinner.setSelection(
+                    Config.indexOf(options, config.actionFor(after, index)), false);
+        });
         return row;
     }
 
@@ -521,10 +664,12 @@ public final class SettingsPanel {
     private static final class ActionAdapter extends ArrayAdapter<String> {
 
         private final String[] keys;
+        private final Config config;
 
-        ActionAdapter(Activity activity, String[] keys) {
+        ActionAdapter(Activity activity, String[] keys, Config config) {
             super(activity, android.R.layout.simple_spinner_item, labels(keys));
             this.keys = keys;
+            this.config = config;
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         }
 
@@ -550,7 +695,7 @@ public final class SettingsPanel {
 
         private int safeColor(int position) {
             if (position < 0 || position >= keys.length) return TEXT;
-            return SettingsPanel.colorOf(keys[position]);
+            return readable(config.colorOf(keys[position]));
         }
     }
 
