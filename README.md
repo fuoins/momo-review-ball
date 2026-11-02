@@ -62,6 +62,8 @@ GitHub Actions 自动构建：推送到 `main` 或手动运行 `build` workflow�
 ./gradlew assembleRelease
 ```
 
+Release 包使用仓库 Secrets 中的固定签名密钥（`KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_ALIAS`、`KEY_PASSWORD`），保证后续版本可以直接覆盖安装；fork 后未配置这些 Secrets 时会自动回退到 debug 签名。
+
 ## 目录
 
 ```
