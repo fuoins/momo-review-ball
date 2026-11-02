@@ -127,23 +127,25 @@ public final class FloatingButtonHook {
     static void attach(final View view) {
         final View.OnTouchListener original;
         final TouchHandler handler;
+        final BallOverlay overlay;
         synchronized (HOOKED) {
             if (HOOKED.containsKey(view)) return;
             original = readTouchListener(view);
-            handler = new TouchHandler(view, original);
+            overlay = new BallOverlay(view);
+            handler = new TouchHandler(view, original, overlay);
             HOOKED.put(view, handler);
         }
         view.setOnTouchListener(handler);
 
-        // 球面标识：边缘四向颜色 + 中心动作文字，纯叠加，不影响任何触摸
+        // 球面标识：给球内部的四向图标染色 + 中心动作文字，纯叠加，不拦截触摸
         try {
-            final BallOverlay overlay = new BallOverlay(view);
             view.getOverlay().add(overlay);
             overlay.start();
             view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
                 @Override
                 public void onViewAttachedToWindow(View v) {
                     overlay.start();
+                    v.post(overlay::bindIcons);
                 }
 
                 @Override
@@ -174,6 +176,7 @@ public final class FloatingButtonHook {
 
         private final View view;
         private final View.OnTouchListener original;
+        private final BallOverlay overlay;
         private final int slop;
         private final int longPressTimeout;
 
@@ -185,9 +188,10 @@ public final class FloatingButtonHook {
         private float lastRawX;
         private float lastRawY;
 
-        TouchHandler(View view, View.OnTouchListener original) {
+        TouchHandler(View view, View.OnTouchListener original, BallOverlay overlay) {
             this.view = view;
             this.original = original;
+            this.overlay = overlay;
             ViewConfiguration vc = ViewConfiguration.get(view.getContext());
             this.slop = Math.max(vc.getScaledTouchSlop(), 1);
             this.longPressTimeout = ViewConfiguration.getLongPressTimeout();
@@ -209,6 +213,8 @@ public final class FloatingButtonHook {
                     downY = event.getRawY();
                     lastRawX = downX;
                     lastRawY = downY;
+                    // 锁定位置时连按下都不给原生，否则它会播长按拖动的反馈动画
+                    if (config.locked) return true;
                     return forward(v, event);
 
                 case MotionEvent.ACTION_MOVE: {
@@ -228,7 +234,13 @@ public final class FloatingButtonHook {
                     }
 
                     if (dragging) {
+                        overlay.setHighlight(0, 0f);
                         return forward(v, event);
+                    }
+
+                    // 模块自己的手势动画：滑动中高亮对应方向，并显示该方向将要执行的动作
+                    if (dist > slop * 0.7f) {
+                        overlay.setHighlight(direction(dx, dy), dist / (slop * 4f));
                     }
 
                     // 直接吞掉，不转发也不钉坐标。
@@ -245,6 +257,7 @@ public final class FloatingButtonHook {
                     float dx = lastRawX - downX;
                     float dy = lastRawY - downY;
                     reset();
+                    overlay.setHighlight(0, 0f);
 
                     if (wasDragging) {
                         // 拖动结束，抬手交给原生做边缘吸附
@@ -252,7 +265,7 @@ public final class FloatingButtonHook {
                     }
 
                     // 拦下这次抬手：先给原生补一个 CANCEL 清理按压态，原生动作就不会触发
-                    cancelNative(v, event);
+                    if (!config.locked) cancelNative(v, event);
                     if (Math.hypot(dx, dy) <= slop * 1.5f) {
                         runAction(v, 0, config);
                     } else {

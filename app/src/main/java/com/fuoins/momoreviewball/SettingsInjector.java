@@ -11,6 +11,7 @@ import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayDeque;
@@ -78,27 +79,32 @@ public final class SettingsInjector {
             panel.setTag(TAG);
 
             ViewGroup parent = findContainer(root);
-            if (parent == null) {
-                XposedLog.w("没找到可插入的容器，页面结构：" + describe(root));
-                addFloatingButton(activity, root);
+            if (parent != null) {
+                try {
+                    parent.addView(panel);
+                    ViewGroup.LayoutParams lp = panel.getLayoutParams();
+                    if (lp != null) {
+                        lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                        panel.setLayoutParams(lp);
+                    }
+                    XposedLog.i("已内联模块配置，容器=" + parent.getClass().getName()
+                            + "，子项数=" + parent.getChildCount());
+                    return true;
+                } catch (Throwable t) {
+                    XposedLog.w("内联失败，改用分区布局：" + t, t);
+                }
+            }
+
+            // 页面根是 ConstraintLayout / RecyclerView 这类没法直接 append 的容器时，
+            // 把整页包进一个竖向 LinearLayout：上面原页面，下面模块设置，互不干扰。
+            if (wrapPage(activity, root, panel)) {
+                XposedLog.i("已把模块配置铺在设置页下方，页面结构：" + describe(root));
                 return true;
             }
 
-            try {
-                parent.addView(panel);
-                ViewGroup.LayoutParams lp = panel.getLayoutParams();
-                if (lp != null) {
-                    lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                    panel.setLayoutParams(lp);
-                }
-                XposedLog.i("已内联模块配置，容器=" + parent.getClass().getName()
-                        + "，子项数=" + parent.getChildCount());
-                return true;
-            } catch (Throwable t) {
-                XposedLog.w("内联失败：" + t, t);
-                addFloatingButton(activity, root);
-                return true;
-            }
+            XposedLog.w("没找到可插入的位置，页面结构：" + describe(root));
+            addFloatingButton(activity, root);
+            return true;
         } catch (Throwable t) {
             XposedLog.e("注入设置失败", t);
             return false;
@@ -116,6 +122,39 @@ public final class SettingsInjector {
             if (scroll.getChildCount() == 0) return scroll;
         }
         return findVerticalLinear(root);
+    }
+
+    /** 上下分区：原页面占满剩余空间，模块配置固定在下方，可单独滚动。 */
+    private static boolean wrapPage(Activity activity, ViewGroup root, View panel) {
+        try {
+            if (root.getChildCount() != 1) return false;
+            View page = root.getChildAt(0);
+            if (page == null) return false;
+
+            root.removeViewAt(0);
+
+            LinearLayout column = new LinearLayout(activity);
+            column.setOrientation(LinearLayout.VERTICAL);
+            root.addView(column, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+            column.addView(page, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+            ScrollView box = new ScrollView(activity);
+            box.setBackgroundColor(0xFFFFFFFF);
+            box.setElevation(Util.dp(activity, 8));
+            box.addView(panel, new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            int height = (int) (activity.getResources().getDisplayMetrics().heightPixels * 0.46f);
+            column.addView(box, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, height));
+            return true;
+        } catch (Throwable t) {
+            XposedLog.w("分区布局失败：" + t, t);
+            return false;
+        }
     }
 
     private static ViewGroup findScrollView(View view) {
