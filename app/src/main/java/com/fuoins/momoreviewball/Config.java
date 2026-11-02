@@ -1,9 +1,7 @@
 package com.fuoins.momoreviewball;
 
 import android.content.Context;
-import android.net.Uri;
-import android.os.Bundle;
-import android.os.SystemClock;
+import android.content.SharedPreferences;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -11,12 +9,13 @@ import org.json.JSONObject;
 import java.util.Arrays;
 
 /**
- * 模块配置。设置页与注入端共用同一份 JSON 结构，通过 ContentProvider 跨进程读取。
+ * 模块配置。设置界面运行在墨墨进程内，因此直接读写墨墨私有目录下的 SharedPreferences，
+ * 不需要跨进程通信，配置改动对悬浮球立即生效。
  */
 public final class Config {
 
-    public static final String AUTHORITY = "com.fuoins.momoreviewball.settings";
-    public static final Uri URI = Uri.parse("content://" + AUTHORITY + "/config");
+    static final String SP_NAME = "momo_ball_config";
+    private static final String KEY_JSON = "config";
 
     public static final String ACTION_NONE = "none";
     public static final String ACTION_KNOW = "know";
@@ -48,20 +47,65 @@ public final class Config {
     };
 
     public boolean enabled = true;
-    public int sizeDp = 52;
-    public int alpha = 88;
     public boolean locked = false;
     public boolean longPressLock = true;
     public boolean haptic = true;
     public boolean diagnose = true;
-    public float xRatio = 0.92f;
-    public float yRatio = 0.74f;
     public int peekMs = 1600;
+    /** 相对初始位置的偏移，按屏幕宽高归一化，换分辨率不跑偏。 */
+    public float offsetXRatio = 0f;
+    public float offsetYRatio = 0f;
     public String[] before = DEFAULT_BEFORE.clone();
     public String[] after = DEFAULT_AFTER.clone();
 
+    private static volatile Config cached;
+
     public static Config defaults() {
         return new Config();
+    }
+
+    public static Config get(Context context) {
+        Config c = cached;
+        if (c != null) return c;
+        c = load(context);
+        cached = c;
+        return c;
+    }
+
+    private static Config load(Context context) {
+        try {
+            SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            String json = sp.getString(KEY_JSON, null);
+            if (json != null && json.length() > 0) return fromJson(json);
+        } catch (Throwable ignored) {
+        }
+        return defaults();
+    }
+
+    public void save(Context context) {
+        try {
+            SharedPreferences sp = context.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE);
+            sp.edit().putString(KEY_JSON, toJson()).apply();
+        } catch (Throwable ignored) {
+        }
+        cached = this;
+    }
+
+    public static void invalidate() {
+        cached = null;
+    }
+
+    public void reset() {
+        enabled = true;
+        locked = false;
+        longPressLock = true;
+        haptic = true;
+        diagnose = true;
+        peekMs = 1600;
+        offsetXRatio = 0f;
+        offsetYRatio = 0f;
+        before = DEFAULT_BEFORE.clone();
+        after = DEFAULT_AFTER.clone();
     }
 
     public String actionFor(boolean answerShown, int gestureIndex) {
@@ -76,15 +120,13 @@ public final class Config {
         JSONObject o = new JSONObject();
         try {
             o.put("enabled", enabled);
-            o.put("sizeDp", sizeDp);
-            o.put("alpha", alpha);
             o.put("locked", locked);
             o.put("longPressLock", longPressLock);
             o.put("haptic", haptic);
             o.put("diagnose", diagnose);
-            o.put("xRatio", (double) xRatio);
-            o.put("yRatio", (double) yRatio);
             o.put("peekMs", peekMs);
+            o.put("offsetXRatio", (double) offsetXRatio);
+            o.put("offsetYRatio", (double) offsetYRatio);
             o.put("before", new JSONArray(Arrays.asList(before)));
             o.put("after", new JSONArray(Arrays.asList(after)));
         } catch (Throwable ignored) {
@@ -98,15 +140,13 @@ public final class Config {
         try {
             JSONObject o = new JSONObject(json);
             c.enabled = o.optBoolean("enabled", c.enabled);
-            c.sizeDp = clamp(o.optInt("sizeDp", c.sizeDp), 40, 72);
-            c.alpha = clamp(o.optInt("alpha", c.alpha), 25, 100);
             c.locked = o.optBoolean("locked", c.locked);
             c.longPressLock = o.optBoolean("longPressLock", c.longPressLock);
             c.haptic = o.optBoolean("haptic", c.haptic);
             c.diagnose = o.optBoolean("diagnose", c.diagnose);
-            c.xRatio = clamp((float) o.optDouble("xRatio", c.xRatio), 0f, 1f);
-            c.yRatio = clamp((float) o.optDouble("yRatio", c.yRatio), 0f, 1f);
             c.peekMs = clamp(o.optInt("peekMs", c.peekMs), 600, 5000);
+            c.offsetXRatio = clamp((float) o.optDouble("offsetXRatio", c.offsetXRatio), -3f, 3f);
+            c.offsetYRatio = clamp((float) o.optDouble("offsetYRatio", c.offsetYRatio), -3f, 3f);
             c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE);
             c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER);
         } catch (Throwable ignored) {
@@ -138,82 +178,5 @@ public final class Config {
 
     public static float clamp(float v, float min, float max) {
         return Math.max(min, Math.min(max, v));
-    }
-
-    /**
-     * 注入端读取配置。模块 App 未启动 / 未安装时回退到默认值。
-     */
-    public static final class Client {
-        private static volatile Config cached;
-        private static volatile long cachedAt;
-        private static volatile long cachedTtl = 700L;
-        private static volatile String lastSource = "unknown";
-
-        private Client() {
-        }
-
-        /** 最近一次配置读取的来源，用于诊断模块与设置页之间的跨进程链路。 */
-        public static String describeSource() {
-            return lastSource;
-        }
-
-        public static Config get(Context context) {
-            long now = SystemClock.elapsedRealtime();
-            Config c = cached;
-            if (c != null && now - cachedAt < cachedTtl) {
-                return c;
-            }
-            c = null;
-            long ttl = 5000L;
-            String source;
-            try {
-                Bundle bundle = context.getContentResolver().call(URI, "get", null, null);
-                if (bundle != null && bundle.getString("json") != null) {
-                    c = fromJson(bundle.getString("json"));
-                    ttl = 2000L;
-                    source = "provider";
-                } else {
-                    source = "provider-empty";
-                }
-            } catch (Throwable t) {
-                source = "provider-error(" + t.getClass().getSimpleName() + ")";
-            }
-            if (c == null) {
-                c = defaults();
-                if ("provider".equals(source) || "provider-empty".equals(source)) {
-                    source = source + "+default";
-                }
-            }
-            lastSource = source;
-            cached = c;
-            cachedAt = now;
-            cachedTtl = ttl;
-            return c;
-        }
-
-        public static void invalidate() {
-            cached = null;
-        }
-
-        public static void setPosition(Context context, float x, float y) {
-            try {
-                Bundle args = new Bundle();
-                args.putFloat("x", clamp(x, 0f, 1f));
-                args.putFloat("y", clamp(y, 0f, 1f));
-                context.getContentResolver().call(URI, "setPosition", null, args);
-            } catch (Throwable ignored) {
-            }
-            invalidate();
-        }
-
-        public static void setLocked(Context context, boolean locked) {
-            try {
-                Bundle args = new Bundle();
-                args.putBoolean("locked", locked);
-                context.getContentResolver().call(URI, "setLocked", null, args);
-            } catch (Throwable ignored) {
-            }
-            invalidate();
-        }
     }
 }

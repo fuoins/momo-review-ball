@@ -1,35 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      模块不提供任何用户界面：没有 launcher 入口，桌面不显示图标，
+      安装后只能通过 LSPosed 管理。所有设置项都在墨墨的「手势悬浮球」页里。
+    -->
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
-        android:supportsRtl="true"
-        android:theme="@style/AppTheme">
-
-        <activity
-            android:name=".SettingsActivity"
-            android:exported="true"
-            android:label="@string/app_name">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-
-        <provider
-            android:name=".SettingsProvider"
-            android:authorities="com.fuoins.momoreviewball.settings"
-            android:enabled="true"
-            android:exported="true" />
+        android:supportsRtl="true">
 
         <meta-data
             android:name="xposedmodule"
             android:value="true" />
         <meta-data
             android:name="xposeddescription"
-            android:value="为墨墨背单词复习页提供可自定义手势的悬浮球" />
+            android:value="接管墨墨自带的复习悬浮球，自定义五种手势在答案出现前后的动作" />
         <meta-data
             android:name="xposedminversion"
             android:value="82" />

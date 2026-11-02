@@ -429,7 +429,7 @@ public final class ActionExecutor {
         view.setAlpha(0f);
         view.animate().alpha(1f).setDuration(120).start();
 
-        int duration = Config.Client.get(activity).peekMs;
+        int duration = Config.get(activity).peekMs;
         view.postDelayed(() -> {
             view.animate().alpha(0f).setDuration(200).withEndAction(() -> {
                 try {
