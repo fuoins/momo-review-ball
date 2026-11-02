@@ -323,6 +323,8 @@ public final class SettingsPanel {
             bar.setProgress(Config.clamp(progress, 0, bar.getMax()));
             value.setText(Math.round(config.scale * 100) + "%");
             preview.setScale(config.scale);
+            // 尺寸没变时 setScale 会直接返回，但动作颜色可能刚改过，仍要重画一次
+            preview.invalidate();
         };
         reload.run();
         reloaders.add(reload);
