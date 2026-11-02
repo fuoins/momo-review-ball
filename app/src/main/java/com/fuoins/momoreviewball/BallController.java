@@ -109,7 +109,14 @@ public final class BallController implements View.OnTouchListener {
             if (review != onReviewScreen) {
                 onReviewScreen = review;
                 Log.i(TAG, "复习页状态 = " + review + " (" + activity.getClass().getName() + ")");
-                if (review) maybeToastLoaded();
+                if (review) {
+                    // 墨墨自带的悬浮球也在 content 里，进入复习页时把自己的球提到最上层。
+                    try {
+                        ball.bringToFront();
+                    } catch (Throwable ignored) {
+                    }
+                    maybeToastLoaded();
+                }
             }
             if (ball.getParent() == null) {
                 try {
