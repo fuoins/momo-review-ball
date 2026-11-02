@@ -8,18 +8,19 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+
+import java.util.ArrayDeque;
 
 /**
  * 把模块配置直接铺进墨墨的「手势悬浮球」设置页
  * （{@code settings.study.StudyGestureActivity}）。
  *
- * <p>优先内联：找到页面里的滚动容器，把配置卡片追加到它的内容末尾，
- * 跟着页面一起滚动，不需要再点按钮、也不会多出一层页面。
- * 只有当页面结构认不出来（例如换成了 RecyclerView / Compose）时，
- * 才退化成右下角一个「模块设置」浮动按钮。
+ * <p>不弹新页面、不需要点按钮：找到页面自己的滚动容器，把配置块追加到它的内容末尾，
+ * 跟页面一起滚动。只有在页面结构完全认不出来时，才退化成右下角一个浮动入口。
  */
 public final class SettingsInjector {
 
@@ -52,63 +53,75 @@ public final class SettingsInjector {
         final ViewGroup root = (ViewGroup) content;
         if (root.findViewWithTag(TAG) != null) return;
 
-        // 等这一帧布局结束再塞，避免拿到还没建好的容器
-        root.post(() -> {
-            try {
-                if (root.findViewWithTag(TAG) != null) return;
-                View panel = SettingsPanel.create(activity);
-                panel.setTag(TAG);
-
-                ViewGroup parent = findContainer(root);
-                if (parent != null) {
-                    try {
-                        parent.addView(panel);
-                        ViewGroup.LayoutParams lp = panel.getLayoutParams();
-                        if (lp != null) {
-                            lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                            panel.setLayoutParams(lp);
+        // 等页面把内容铺完再塞；布局没稳时先挂一次全局布局监听
+        root.postDelayed(() -> tryAttach(activity, root), 320L);
+        root.getViewTreeObserver().addOnGlobalLayoutListener(
+                new ViewTreeObserver.OnGlobalLayoutListener() {
+                    @Override
+                    public void onGlobalLayout() {
+                        if (tryAttach(activity, root)) {
+                            try {
+                                root.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+                            } catch (Throwable ignored) {
+                            }
                         }
-                        XposedLog.i("已内联模块配置到 " + parent.getClass().getName());
-                        return;
-                    } catch (Throwable t) {
-                        XposedLog.w("内联失败，改用浮动入口", t);
                     }
-                }
-                addFloatingButton(activity, root);
-            } catch (Throwable t) {
-                XposedLog.e("注入设置失败", t);
-            }
-        });
+                });
     }
 
-    /** 找页面的内容容器：优先滚动容器里那个竖向 LinearLayout。 */
+    /** @return true 表示已经处理完（注入成功或已存在），不需要再重试。 */
+    private static boolean tryAttach(Activity activity, ViewGroup root) {
+        try {
+            if (root.findViewWithTag(TAG) != null) return true;
+
+            View panel = SettingsPanel.create(activity);
+            panel.setTag(TAG);
+
+            ViewGroup parent = findContainer(root);
+            if (parent == null) {
+                XposedLog.w("没找到可插入的容器，页面结构：" + describe(root));
+                addFloatingButton(activity, root);
+                return true;
+            }
+
+            try {
+                parent.addView(panel);
+                ViewGroup.LayoutParams lp = panel.getLayoutParams();
+                if (lp != null) {
+                    lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                    panel.setLayoutParams(lp);
+                }
+                XposedLog.i("已内联模块配置，容器=" + parent.getClass().getName()
+                        + "，子项数=" + parent.getChildCount());
+                return true;
+            } catch (Throwable t) {
+                XposedLog.w("内联失败：" + t, t);
+                addFloatingButton(activity, root);
+                return true;
+            }
+        } catch (Throwable t) {
+            XposedLog.e("注入设置失败", t);
+            return false;
+        }
+    }
+
+    /** 页面内容容器：优先滚动容器里的内容布局，其次第一个竖向 LinearLayout。 */
     private static ViewGroup findContainer(View root) {
         ViewGroup scroll = findScrollView(root);
         if (scroll != null) {
             for (int i = 0; i < scroll.getChildCount(); i++) {
                 View child = scroll.getChildAt(i);
-                if (child instanceof LinearLayout) {
-                    return (LinearLayout) child;
-                }
+                if (child instanceof LinearLayout) return (LinearLayout) child;
             }
+            if (scroll.getChildCount() == 0) return scroll;
         }
-        if (root instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) root;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                View child = group.getChildAt(i);
-                if (child instanceof LinearLayout
-                        && child.getClass().getName().equals(LinearLayout.class.getName())) {
-                    return (LinearLayout) child;
-                }
-            }
-        }
-        return null;
+        return findVerticalLinear(root);
     }
 
     private static ViewGroup findScrollView(View view) {
         if (view == null) return null;
         String name = view.getClass().getName();
-        if (name.endsWith("ScrollView") || name.endsWith("NestedScrollView")) {
+        if (name.endsWith("ScrollView")) {
             return view instanceof ViewGroup ? (ViewGroup) view : null;
         }
         if (view instanceof ViewGroup) {
@@ -119,6 +132,53 @@ public final class SettingsInjector {
             }
         }
         return null;
+    }
+
+    /** 广度优先找第一个装了多个子项的竖向 LinearLayout。 */
+    private static ViewGroup findVerticalLinear(View root) {
+        ArrayDeque<View> queue = new ArrayDeque<>();
+        queue.add(root);
+        while (!queue.isEmpty()) {
+            View view = queue.poll();
+            if (view instanceof LinearLayout) {
+                LinearLayout ll = (LinearLayout) view;
+                if (ll.getOrientation() == LinearLayout.VERTICAL
+                        && ll.getChildCount() >= 2
+                        && ll != root) {
+                    return ll;
+                }
+            }
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) {
+                    queue.add(group.getChildAt(i));
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 只打印类名和层级，便于定位页面结构。 */
+    private static String describe(View root) {
+        StringBuilder sb = new StringBuilder();
+        ArrayDeque<View> queue = new ArrayDeque<>();
+        queue.add(root);
+        int count = 0;
+        while (!queue.isEmpty() && count < 26) {
+            View view = queue.poll();
+            sb.append(view.getClass().getSimpleName()).append('(')
+                    .append(view.getWidth()).append('x').append(view.getHeight()).append(')');
+            if (view.getTag() != null) sb.append('#').append(view.getTag());
+            sb.append(" | ");
+            count++;
+            if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount() && i < 12; i++) {
+                    queue.add(group.getChildAt(i));
+                }
+            }
+        }
+        return sb.toString();
     }
 
     private static void addFloatingButton(final Activity activity, ViewGroup root) {

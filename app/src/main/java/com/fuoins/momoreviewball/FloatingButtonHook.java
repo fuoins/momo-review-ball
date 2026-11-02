@@ -134,6 +134,27 @@ public final class FloatingButtonHook {
             HOOKED.put(view, handler);
         }
         view.setOnTouchListener(handler);
+
+        // 球面标识：边缘四向颜色 + 中心动作文字，纯叠加，不影响任何触摸
+        try {
+            final BallOverlay overlay = new BallOverlay(view);
+            view.getOverlay().add(overlay);
+            overlay.start();
+            view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+                @Override
+                public void onViewAttachedToWindow(View v) {
+                    overlay.start();
+                }
+
+                @Override
+                public void onViewDetachedFromWindow(View v) {
+                    overlay.stop();
+                }
+            });
+        } catch (Throwable t) {
+            XposedLog.w("叠加球面标识失败", t);
+        }
+
         sFound = true;
         XposedLog.i("已代理自带悬浮球，原有 listener=" + original);
     }
@@ -161,8 +182,8 @@ public final class FloatingButtonHook {
         private long downAt;
         private float downX;
         private float downY;
-        private float downViewX;
-        private float downViewY;
+        private float lastRawX;
+        private float lastRawY;
 
         TouchHandler(View view, View.OnTouchListener original) {
             this.view = view;
@@ -186,14 +207,16 @@ public final class FloatingButtonHook {
                     downAt = SystemClock.uptimeMillis();
                     downX = event.getRawX();
                     downY = event.getRawY();
-                    downViewX = event.getX();
-                    downViewY = event.getY();
+                    lastRawX = downX;
+                    lastRawY = downY;
                     return forward(v, event);
 
                 case MotionEvent.ACTION_MOVE: {
                     if (!tracking) return forward(v, event);
-                    float dx = event.getRawX() - downX;
-                    float dy = event.getRawY() - downY;
+                    lastRawX = event.getRawX();
+                    lastRawY = event.getRawY();
+                    float dx = lastRawX - downX;
+                    float dy = lastRawY - downY;
                     float dist = (float) Math.hypot(dx, dy);
 
                     // 按住超过长按阈值后才开始移动 = 墨墨自己的「长按拖动」
@@ -208,21 +231,19 @@ public final class FloatingButtonHook {
                         return forward(v, event);
                     }
 
-                    // 非拖动状态：把坐标钉回按下点再转发。
-                    // 原生因此认为手指一直没动，既不会触发它自己的滑动动作
-                    // （这是「有时候还是原来的」的根因），按压动画又照常保持。
-                    MotionEvent pinned = MotionEvent.obtain(event);
-                    pinned.offsetLocation(downViewX - event.getX(), downViewY - event.getY());
-                    boolean handled = forward(v, pinned);
-                    pinned.recycle();
-                    return handled;
+                    // 直接吞掉，不转发也不钉坐标。
+                    // 转发会被原生抢先判定手势（时好时坏）；钉坐标会让原生 onTouchEvent
+                    // 认为没有位移而返回 false，触摸序列被父容器取消，抬手事件收不到，
+                    // 于是只剩点击能用。吞掉则自己保证序列连续，原生完全不知道手指动过。
+                    return true;
                 }
 
                 case MotionEvent.ACTION_UP: {
                     if (!tracking) return forward(v, event);
                     boolean wasDragging = dragging;
-                    float dx = event.getRawX() - downX;
-                    float dy = event.getRawY() - downY;
+                    // 用自己记的最后一个 MOVE 坐标，不依赖抬手事件本身
+                    float dx = lastRawX - downX;
+                    float dy = lastRawY - downY;
                     reset();
 
                     if (wasDragging) {
