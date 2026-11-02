@@ -8,7 +8,6 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.ViewTreeObserver;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -28,6 +27,9 @@ public final class SettingsInjector {
     private static final String ACTIVITY = "com.maimemo.android.momo.settings.study.StudyGestureActivity";
     private static final String TAG = "momo_ball_settings_entry";
     private static final int ORANGE = 0xFFF2A33C;
+
+    /** 页面是异步铺开的，注入要等；重试这么多次还不行才退回浮动入口。 */
+    private static final int MAX_ATTEMPTS = 10;
 
     private SettingsInjector() {
     }
@@ -53,62 +55,80 @@ public final class SettingsInjector {
         if (!(content instanceof ViewGroup)) return;
         final ViewGroup root = (ViewGroup) content;
         if (root.findViewWithTag(TAG) != null) return;
-
-        // 等页面把内容铺完再塞；布局没稳时先挂一次全局布局监听
-        root.postDelayed(() -> tryAttach(activity, root), 320L);
-        root.getViewTreeObserver().addOnGlobalLayoutListener(
-                new ViewTreeObserver.OnGlobalLayoutListener() {
-                    @Override
-                    public void onGlobalLayout() {
-                        if (tryAttach(activity, root)) {
-                            try {
-                                root.getViewTreeObserver().removeOnGlobalLayoutListener(this);
-                            } catch (Throwable ignored) {
-                            }
-                        }
-                    }
-                });
+        schedule(activity, root, 0);
     }
 
-    /** @return true 表示已经处理完（注入成功或已存在），不需要再重试。 */
-    private static boolean tryAttach(Activity activity, ViewGroup root) {
-        try {
-            if (root.findViewWithTag(TAG) != null) return true;
-
-            View panel = SettingsPanel.create(activity);
-            panel.setTag(TAG);
-
-            // 首选：把页面列表搬进同一个滚动容器，模块配置紧接其后，
-            // 整页只有一个滚动区，看起来就是原生设置项的延续
-            if (mergeIntoScroll(activity, root, panel)) {
-                return true;
+    /**
+     * 定时重试注入。
+     *
+     * <p>墨墨这个页面是异步铺开的：Activity 起来时 RecyclerView 可能还没 add 进来，
+     * 或者父容器还没量出高度。之前只要第一次没命中就立刻退化成右下角「模块设置」按钮，
+     * 于是永远看不到内联配置——必须给它几次机会。
+     */
+    private static void schedule(final Activity activity, final ViewGroup root, final int attempt) {
+        root.postDelayed(() -> {
+            try {
+                if (root.findViewWithTag(TAG) != null) return;
+                if (tryAttach(activity, root, attempt)) return;
+            } catch (Throwable t) {
+                XposedLog.e("注入设置失败（第 " + (attempt + 1) + " 次）", t);
+                if (attempt + 1 < MAX_ATTEMPTS) schedule(activity, root, attempt + 1);
+                return;
             }
-
-            // 次选：页面本身就有滚动容器，直接追加到内容末尾
-            ViewGroup parent = findContainer(root);
-            if (parent != null) {
-                try {
-                    parent.addView(panel);
-                    ViewGroup.LayoutParams lp = panel.getLayoutParams();
-                    if (lp != null) {
-                        lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                        panel.setLayoutParams(lp);
-                    }
-                    XposedLog.i("已内联模块配置，容器=" + parent.getClass().getName()
-                            + "，子项数=" + parent.getChildCount());
-                    return true;
-                } catch (Throwable t) {
-                    XposedLog.w("内联失败：" + t, t);
-                }
+            if (attempt + 1 < MAX_ATTEMPTS) {
+                schedule(activity, root, attempt + 1);
+            } else {
+                XposedLog.w("重试 " + MAX_ATTEMPTS + " 次仍没找到可插入的位置，页面结构：" + describe(root));
+                addFloatingButton(activity, root);
             }
+        }, attempt == 0 ? 320L : 220L);
+    }
 
-            XposedLog.w("没找到可插入的位置，页面结构：" + describe(root));
-            addFloatingButton(activity, root);
-            return true;
-        } catch (Throwable t) {
-            XposedLog.e("注入设置失败", t);
+    /** @return true 表示处理完了（注入成功或已存在）；false 表示页面还没铺好，再来一次。 */
+    private static boolean tryAttach(Activity activity, ViewGroup root, int attempt) {
+        if (root.findViewWithTag(TAG) != null) return true;
+
+        View recycler = findRecycler(root);
+        if (recycler == null) {
+            XposedLog.d("第 " + (attempt + 1) + " 次：页面里还没有列表");
             return false;
         }
+
+        // 首选：把页面列表搬进同一个滚动容器，模块配置紧接其后，
+        // 整页只有一个滚动区，看起来就是原生设置项的延续
+        View panel = SettingsPanel.create(activity);
+        panel.setTag(TAG);
+        if (mergeIntoScroll(activity, root, panel, recycler)) {
+            return true;
+        }
+
+        // 结构还在变（列表刚 add、父容器还没量高），先等下一轮
+        if (attempt + 1 < MAX_ATTEMPTS) {
+            XposedLog.d("第 " + (attempt + 1) + " 次：列表还没准备好，稍后重试");
+            return false;
+        }
+
+        // 次选：页面本身就有滚动容器，直接追加到内容末尾
+        ViewGroup parent = findContainer(root);
+        if (parent != null) {
+            try {
+                parent.addView(panel);
+                ViewGroup.LayoutParams lp = panel.getLayoutParams();
+                if (lp != null) {
+                    lp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                    panel.setLayoutParams(lp);
+                }
+                XposedLog.i("已内联模块配置，容器=" + parent.getClass().getName()
+                        + "，子项数=" + parent.getChildCount());
+                return true;
+            } catch (Throwable t) {
+                XposedLog.w("内联失败：" + t, t);
+            }
+        }
+
+        XposedLog.w("没找到可插入的位置，页面结构：" + describe(root));
+        addFloatingButton(activity, root);
+        return true;
     }
 
     /** 页面内容容器：优先滚动容器里的内容布局，其次第一个竖向 LinearLayout。 */
@@ -135,11 +155,9 @@ public final class SettingsInjector {
      * </ul>
      * 两种结果都是整页只有一个滚动区，配置紧接原生项，不再分成上下两块。
      */
-    private static boolean mergeIntoScroll(Activity activity, ViewGroup root, View panel) {
+    private static boolean mergeIntoScroll(Activity activity, ViewGroup root, View panel,
+                                           View recycler) {
         try {
-            View recycler = findRecycler(root);
-            if (recycler == null) return false;
-
             View existing = findScrollView(root);
             if (existing instanceof ViewGroup
                     && mergeIntoExisting((ViewGroup) existing, recycler, panel)) {
@@ -195,13 +213,20 @@ public final class SettingsInjector {
         ViewGroup parent = (ViewGroup) recycler.getParent();
         if (parent == null) return false;
         // 只处理能直接给子 View 定绝对位置的容器，约束布局硬塞会跑到左上角
-        if (!(parent instanceof FrameLayout) && !(parent instanceof LinearLayout)) return false;
+        if (!(parent instanceof FrameLayout) && !(parent instanceof LinearLayout)) {
+            XposedLog.w("列表父容器是 " + parent.getClass().getName() + "，暂不支持包裹");
+            return false;
+        }
 
         int index = parent.indexOfChild(recycler);
         int top = recycler.getTop() - parent.getPaddingTop();
         int limit = availableBottom(parent, recycler);
         int height = limit - recycler.getTop();
-        if (height <= 0) return false;
+        if (height <= 0) {
+            XposedLog.d("列表可用高度算不出来：parent=" + parent.getWidth() + "x"
+                    + parent.getHeight() + " top=" + recycler.getTop() + " limit=" + limit);
+            return false;
+        }
 
         parent.removeView(recycler);
         stopNestedScroll(recycler);

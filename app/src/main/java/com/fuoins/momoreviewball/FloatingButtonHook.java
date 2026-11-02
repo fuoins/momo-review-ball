@@ -141,9 +141,23 @@ public final class FloatingButtonHook {
         try {
             view.getOverlay().add(overlay);
             overlay.start();
+
+            // ViewOverlay 只在 add 的那一刻按控件宽高设一次 bounds。
+            // 构造 / inflate 阶段控件还没测量，尺寸为 0，bounds 会一直是 0×0，
+            // 之后 draw 就再也画不出东西——必须在布局完成后补一次，并跟着尺寸变化。
+            view.addOnLayoutChangeListener((v, left, top, right, bottom,
+                                            oldLeft, oldTop, oldRight, oldBottom) -> {
+                overlay.setBounds(0, 0, v.getWidth(), v.getHeight());
+            });
+            view.post(() -> {
+                overlay.setBounds(0, 0, view.getWidth(), view.getHeight());
+                XposedLog.i("已设置球面标识范围 " + view.getWidth() + "x" + view.getHeight());
+            });
+
             view.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
                 @Override
                 public void onViewAttachedToWindow(View v) {
+                    overlay.setBounds(0, 0, v.getWidth(), v.getHeight());
                     overlay.start();
                 }
 

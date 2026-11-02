@@ -44,6 +44,7 @@ final class BallOverlay extends Drawable {
 
     private boolean after;
     private boolean running;
+    private boolean reported;
     private int highlight = 0;
     private float progress = 0f;
 
@@ -106,10 +107,26 @@ final class BallOverlay extends Drawable {
     @Override
     public void draw(Canvas canvas) {
         Rect b = getBounds();
-        if (b.width() <= 0 || b.height() <= 0) return;
+        if (b.width() <= 0 || b.height() <= 0) {
+            // ViewOverlay 是在 add() 那一刻按控件当时的宽高设 bounds 的。
+            // inflate 阶段控件还没测量，尺寸是 0，bounds 就永久停在 0×0，
+            // draw 会被这里直接 return 掉——表现就是「球上什么都没变」。
+            // 所以尺寸拿不到时退回控件当前的实际大小。
+            int w = host.getWidth();
+            int h = host.getHeight();
+            if (w <= 0 || h <= 0) return;
+            b.set(0, 0, w, h);
+        }
 
         Config config = Config.get(host.getContext());
         if (!config.enabled) return;
+
+        if (!reported) {
+            reported = true;
+            XposedLog.i("球面标识开始绘制 " + b.width() + "x" + b.height()
+                    + "，子View=" + (host instanceof ViewGroup
+                            ? ((ViewGroup) host).getChildCount() : -1));
+        }
 
         Context context = host.getContext();
 
