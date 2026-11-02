@@ -80,7 +80,7 @@ public class BallView extends View {
         super.onDraw(canvas);
         float cx = getWidth() / 2f;
         float cy = getHeight() / 2f;
-        float radius = Math.min(getWidth(), getHeight()) / 2f - dp(3.5f);
+        float radius = Math.min(getWidth(), getHeight()) / 2f - dp(5.0f);
 
         int alpha = Math.round(255f * alphaPercent / 100f);
         fillPaint.setColor(Color.argb(alpha, 47, 62, 110));
@@ -109,10 +109,10 @@ public class BallView extends View {
         }
 
         if (flash > 0f) {
-            ringPaint.setStrokeWidth(dp(2.0f));
+            ringPaint.setStrokeWidth(dp(1.6f));
             ringPaint.setColor(flashOk ? 0xFF54C08A : 0xFFE05A5A);
             ringPaint.setAlpha((int) (255 * (1f - flash)));
-            canvas.drawCircle(cx, cy, radius + dp(4f) + dp(9f) * flash, ringPaint);
+            canvas.drawCircle(cx, cy, radius + dp(1.5f) + dp(3f) * flash, ringPaint);
             ringPaint.setStrokeWidth(dp(1.1f));
             ringPaint.setColor(0x44FFFFFF);
         }

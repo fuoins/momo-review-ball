@@ -1,7 +1,9 @@
 package com.fuoins.momoreviewball;
 
 import android.app.Activity;
+import android.app.Application;
 import android.app.Instrumentation;
+import android.content.Context;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -21,6 +23,19 @@ public class ModuleEntry implements IXposedHookLoadPackage {
         if (lpparam == null || !PACKAGE_NAME.equals(lpparam.packageName)) return;
 
         XposedBridge.log(TAG + ": loaded in " + lpparam.processName);
+
+        // 进程启动时在后台预热配置，避免第一次进复习页时同步读取造成卡顿。
+        try {
+            XposedHelpers.findAndHookMethod(Application.class, "onCreate", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    final Context context = (Context) param.thisObject;
+                    new Thread(() -> Config.Client.get(context), "momo-ball-config").start();
+                }
+            });
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": hook Application.onCreate failed");
+        }
 
         try {
             XposedHelpers.findAndHookMethod(Instrumentation.class, "callActivityOnResume",
