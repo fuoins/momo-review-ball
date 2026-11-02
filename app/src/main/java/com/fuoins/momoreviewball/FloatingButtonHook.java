@@ -203,9 +203,65 @@ public final class FloatingButtonHook {
             }
             sClassHooked = true;
             XposedLog.i("已 hook " + CLASS_NAME + " 构造");
+            hookFloatBtnListener(clazz);
         } catch (Throwable t) {
             XposedLog.e("hook 悬浮球类失败", t);
         }
+    }
+
+    /** 球的点击/滑动手势最终是回调给这个 listener 的，抓住它就能直接触发官方动作。 */
+    private static volatile Object sFloatBtnListener;
+
+    private static void hookFloatBtnListener(Class<?> clazz) {
+        try {
+            Method target = null;
+            for (Method method : clazz.getDeclaredMethods()) {
+                if (method.getName().equals("setOnFloatBtnClickListener")
+                        && method.getParameterTypes().length == 1) {
+                    target = method;
+                    break;
+                }
+            }
+            if (target == null) {
+                XposedLog.w("没找到 setOnFloatBtnClickListener");
+                return;
+            }
+            XposedBridge.hookMethod(target, new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    if (param.args == null || param.args.length != 1 || param.args[0] == null) return;
+                    Object listener = param.args[0];
+                    if (listener == sFloatBtnListener) return;
+                    sFloatBtnListener = listener;
+                    dumpListener(listener);
+                }
+            });
+            XposedLog.i("已监听球的 listener 注册");
+        } catch (Throwable t) {
+            XposedLog.w("hook setOnFloatBtnClickListener 失败", t);
+        }
+    }
+
+    private static void dumpListener(Object listener) {
+        Class<?> clazz = listener.getClass();
+        StringBuilder sb = new StringBuilder("球的手势回调 ").append(clazz.getName()).append(" 方法：");
+        try {
+            for (Method method : clazz.getDeclaredMethods()) {
+                sb.append(method.getName()).append('(');
+                Class<?>[] params = method.getParameterTypes();
+                for (int i = 0; i < params.length; i++) {
+                    if (i > 0) sb.append(',');
+                    sb.append(params[i].getSimpleName());
+                }
+                sb.append(") ");
+            }
+        } catch (Throwable ignored) {
+        }
+        XposedLog.i(sb.toString());
+    }
+
+    static Object floatBtnListener() {
+        return sFloatBtnListener;
     }
 
     // ---------------------------------------------------------------- 事件分发
@@ -738,13 +794,21 @@ public final class FloatingButtonHook {
             try {
                 view.setHapticFeedbackEnabled(false);
 
-                // ① 先给球控件本身。日志实测：球的 dispatchTouchEvent 返回 false、
-                //    OnTouchListener 为 null——球根本不参与常驻触摸。
-                String where = "球控件";
-                boolean consumed = sendSequence(event -> view.dispatchTouchEvent(event),
+                // ① 直调球的 onTouchEvent：类方法列表里有 onTouchEvent/1，说明墨墨的
+                //    触摸处理就在球自己身上。直调可以绕开父容器（ViewPager / 返回手势层）
+                //    在 MOVE 阶段的拦截。
+                String where = "球 onTouchEvent";
+                boolean consumed = sendSequence(event -> view.onTouchEvent(event),
                         w / 2f, h / 2f, dx, dy, screen, downAt);
 
-                // ② 球自己不吃 DOWN，说明墨墨的球手势是「悬浮层」统一处理的，写在
+                // ② 再走一次正常分发，覆盖「手势判定写在 onInterceptTouchEvent」的版本
+                if (!consumed) {
+                    where = "球 dispatchTouchEvent";
+                    consumed = sendSequence(event -> view.dispatchTouchEvent(event),
+                            w / 2f, h / 2f, dx, dy, screen, downAt);
+                }
+
+                // ③ 球自己不吃 DOWN，说明墨墨的球手势是「悬浮层」统一处理的，写在
                 //    页面/Activity 的 dispatchTouchEvent 里。从 Activity 层重新走一遍
                 //    完整分发，等价于用户真的在球上滑了一下。
                 //    DOWN 没人接就立刻发 CANCEL，绝不会把这次注入变成一次页面点击。
@@ -762,8 +826,12 @@ public final class FloatingButtonHook {
                         }
                         int[] rawOffset = {screen[0] - win[0], screen[1] - win[1]};
                         where = "Activity 分发";
+                        // 阻止 ViewPager / 返回手势层在 MOVE 阶段把事件抢走
+                        ViewParent parent = view.getParent();
+                        if (parent != null) parent.requestDisallowInterceptTouchEvent(true);
                         consumed = sendSequence(event -> activity.dispatchTouchEvent(event),
                                 win[0] + w / 2f, win[1] + h / 2f, dx, dy, rawOffset, downAt);
+                        if (parent != null) parent.requestDisallowInterceptTouchEvent(false);
                     }
                 }
 
