@@ -14,9 +14,13 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.Switch;
 import android.widget.TextView;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * 模块的手势配置面板。
@@ -24,7 +28,7 @@ import android.widget.TextView;
  * <p>正常情况下由 {@link SettingsInjector} 直接内联进墨墨「手势悬浮球」设置页，
  * 跟页面原有内容一起滚动，不需要再弹一层页面；只有内联失败时才退化成一个 Dialog。
  *
- * <p>动作名称沿用墨墨自己的颜色：认识绿、模糊橙、忘记红、熟知青、发音紫、瞄一眼蓝、返回灰。
+ * <p>动作名称沿用墨墨自己的颜色：认识绿、模糊橙、忘记红、熟知青、发音紫、返回灰。
  */
 public final class SettingsPanel {
 
@@ -48,8 +52,6 @@ public final class SettingsPanel {
                 return 0xFF00897B;   // 熟知 · 青
             case Config.ACTION_PRONOUNCE:
                 return 0xFF8E44AD;   // 发音 · 紫
-            case Config.ACTION_PEEK:
-                return 0xFF2196F3;   // 瞄一眼 · 蓝
             case Config.ACTION_PREV:
                 return 0xFF9E9E9E;   // 返回上一个单词 · 灰
             case Config.ACTION_SHOW:
@@ -59,17 +61,10 @@ public final class SettingsPanel {
         }
     }
 
-    private static int[] colors() {
-        int[] out = new int[Config.ACTION_KEYS.length];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = colorOf(Config.ACTION_KEYS[i]);
-        }
-        return out;
-    }
-
     /** 生成可以塞进任意页面的一块配置区域。 */
     public static View create(final Activity activity) {
         final Config config = Config.get(activity);
+        final List<Runnable> reloaders = new ArrayList<>();
 
         LinearLayout card = new LinearLayout(activity);
         card.setOrientation(LinearLayout.VERTICAL);
@@ -83,6 +78,12 @@ public final class SettingsPanel {
 
         card.addView(divider(activity));
 
+        // 尺寸放在最前面：正好接在原生设置项「出现答案前显示悬浮球」下面，
+        // 顶替掉原来那个「悬浮球尺寸」。
+        card.addView(sizeRow(activity, config, reloaders));
+        card.addView(hint(activity,
+                "拖动时预览和复习页的球一起变，1.0 倍就是墨墨原生大小；预览用的是「单词出现前」配色。"));
+
         // 「熟知」不是默认就有的按钮，墨墨要在别处打开才会出现，这里给一条常驻提示，
         // 只在真的用到了「熟知」时显示。
         final TextView familiarNotice = notice(activity,
@@ -92,15 +93,15 @@ public final class SettingsPanel {
                 usesFamiliar(config) ? View.VISIBLE : View.GONE);
 
         card.addView(sectionTitle(activity, "单词出现前"));
-        card.addView(hint(activity, "还没显示答案时生效"));
+        card.addView(hint(activity, "还没显示答案时生效（只有显示单词 / 发音 / 返回）"));
         for (int i = 0; i < Config.GESTURE_LABELS.length; i++) {
-            card.addView(gestureRow(activity, config, false, i, syncNotice));
+            card.addView(gestureRow(activity, config, false, i, syncNotice, reloaders));
         }
 
         card.addView(sectionTitle(activity, "单词出现后"));
         card.addView(hint(activity, "出现「认识 / 模糊 / 忘记」评分按钮后生效"));
         for (int i = 0; i < Config.GESTURE_LABELS.length; i++) {
-            card.addView(gestureRow(activity, config, true, i, syncNotice));
+            card.addView(gestureRow(activity, config, true, i, syncNotice, reloaders));
         }
         card.addView(familiarNotice);
         syncNotice.run();
@@ -110,17 +111,13 @@ public final class SettingsPanel {
             config.locked = checked;
             config.save(activity);
         }));
-        card.addView(switchRow(activity, "操作振动", config.haptic, checked -> {
-            config.haptic = checked;
-            config.save(activity);
-        }));
         card.addView(switchRow(activity, "启用模块手势", config.enabled, checked -> {
             config.enabled = checked;
             config.save(activity);
         }));
 
         Button reset = new Button(activity);
-        reset.setText("恢复默认手势");
+        reset.setText("恢复默认设置");
         reset.setAllCaps(false);
         reset.setTextColor(NAVY);
         reset.setBackgroundColor(Color.TRANSPARENT);
@@ -131,6 +128,9 @@ public final class SettingsPanel {
         reset.setOnClickListener(v -> {
             config.reset();
             config.save(activity);
+            for (Runnable reloader : reloaders) reloader.run();
+            syncNotice.run();
+            FloatingButtonHook.applyScale();
             ActionExecutor.toast(activity, "已恢复默认设置");
         });
         card.addView(reset);
@@ -154,16 +154,94 @@ public final class SettingsPanel {
         });
         card.addView(diag);
 
-        // 最近几行事件：不用导出也能看到模块到底有没有接管到球
-        TextView recent = new TextView(activity);
-        recent.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-        recent.setTextColor(0xFF9AA0AC);
-        recent.setPadding(0, Util.dp(activity, 6), 0, 0);
-        recent.setText(Diag.recent(3));
-        recent.setOnClickListener(v -> recent.setText(Diag.recent(14)));
-        card.addView(recent);
+        // 日志本身不在这里展示，用的时候导出就行
+        TextView logHint = new TextView(activity);
+        logHint.setText("调试用。日志只在内存里滚动保留最近 600 条，满了自动丢最早的，"
+                + "不会一直变大；导出时才写成文本文件。");
+        logHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
+        logHint.setTextColor(0xFF9AA0AC);
+        logHint.setLineSpacing(Util.dp(activity, 2), 1f);
+        logHint.setPadding(0, Util.dp(activity, 2), 0, 0);
+        card.addView(logHint);
 
         return card;
+    }
+
+    /** 自定义大小：一行标题 + 百分比，下面滑杆，再下面实时预览的球。 */
+    private static View sizeRow(Activity activity, Config config, List<Runnable> reloaders) {
+        LinearLayout box = new LinearLayout(activity);
+        box.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams boxLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        boxLp.topMargin = Util.dp(activity, 18);
+        boxLp.bottomMargin = Util.dp(activity, 2);
+        box.setLayoutParams(boxLp);
+
+        LinearLayout head = new LinearLayout(activity);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView label = new TextView(activity);
+        label.setText("自定义大小");
+        label.setTextColor(TEXT);
+        label.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        label.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        head.addView(label);
+
+        final TextView value = new TextView(activity);
+        value.setTextColor(NAVY);
+        value.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        value.getPaint().setFakeBoldText(true);
+        head.addView(value);
+        box.addView(head);
+
+        SeekBar bar = new SeekBar(activity);
+        bar.setMax(90);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        barLp.topMargin = Util.dp(activity, 4);
+        box.addView(bar, barLp);
+
+        // 滑杆下面就是预览，拖到哪儿球就多大
+        final BallPreview preview = new BallPreview(activity, config);
+        LinearLayout.LayoutParams previewLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        previewLp.topMargin = Util.dp(activity, 6);
+        box.addView(preview, previewLp);
+
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                float scale = Config.SCALE_MIN + progress / 100f;
+                value.setText(Math.round(scale * 100) + "%");
+                preview.setScale(scale);
+                if (!fromUser) return;
+                config.scale = scale;
+                // 复习页的球如果还在窗口里，跟着一起变
+                FloatingButtonHook.applyScale();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                config.save(activity);
+            }
+        });
+
+        // 初始状态 + 「恢复默认」时回到原位
+        Runnable reload = () -> {
+            int progress = Math.round((config.scale - Config.SCALE_MIN) * 100f);
+            bar.setProgress(Config.clamp(progress, 0, 90));
+            value.setText(Math.round(config.scale * 100) + "%");
+            preview.setScale(config.scale);
+        };
+        reload.run();
+        reloaders.add(reload);
+        return box;
     }
 
     /** 和上方原生列表之间的一条细线，替代原来的卡片边界。 */
@@ -263,7 +341,7 @@ public final class SettingsPanel {
 
     private static View gestureRow(final Activity activity, final Config config,
                                    final boolean after, final int index,
-                                   final Runnable onChanged) {
+                                   final Runnable onChanged, List<Runnable> reloaders) {
         LinearLayout row = new LinearLayout(activity);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -280,17 +358,18 @@ public final class SettingsPanel {
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         row.addView(label);
 
+        final String[] options = Config.actionsFor(after);
         Spinner spinner = new Spinner(activity, Spinner.MODE_DROPDOWN);
-        ActionAdapter adapter = new ActionAdapter(activity, colors());
+        ActionAdapter adapter = new ActionAdapter(activity, options);
         spinner.setAdapter(adapter);
-        spinner.setSelection(indexOf(config.actionFor(after, index)), false);
+        spinner.setSelection(Config.indexOf(options, config.actionFor(after, index)), false);
         spinner.setLayoutParams(new LinearLayout.LayoutParams(
                 Util.dp(activity, 158), ViewGroup.LayoutParams.WRAP_CONTENT));
 
         spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override
             public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                String key = Config.ACTION_KEYS[position];
+                String key = options[position];
                 String[] target = after ? config.after : config.before;
                 if (TextUtils.equals(target[index], key)) return;
                 target[index] = key;
@@ -303,6 +382,9 @@ public final class SettingsPanel {
             }
         });
         row.addView(spinner);
+
+        reloaders.add(() -> spinner.setSelection(
+                Config.indexOf(options, config.actionFor(after, index)), false));
         return row;
     }
 
@@ -333,22 +415,21 @@ public final class SettingsPanel {
         return row;
     }
 
-    private static int indexOf(String key) {
-        for (int i = 0; i < Config.ACTION_KEYS.length; i++) {
-            if (Config.ACTION_KEYS[i].equals(key)) return i;
-        }
-        return 0;
-    }
-
     /** 下拉选项按动作上色，和墨墨自带的配色一致。 */
     private static final class ActionAdapter extends ArrayAdapter<String> {
 
-        private final int[] colors;
+        private final String[] keys;
 
-        ActionAdapter(Activity activity, int[] colors) {
-            super(activity, android.R.layout.simple_spinner_item, Config.ACTION_LABELS);
-            this.colors = colors;
+        ActionAdapter(Activity activity, String[] keys) {
+            super(activity, android.R.layout.simple_spinner_item, labels(keys));
+            this.keys = keys;
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        }
+
+        private static String[] labels(String[] keys) {
+            String[] out = new String[keys.length];
+            for (int i = 0; i < keys.length; i++) out[i] = Config.labelOf(keys[i]);
+            return out;
         }
 
         @Override
@@ -366,8 +447,8 @@ public final class SettingsPanel {
         }
 
         private int safeColor(int position) {
-            if (position < 0 || position >= colors.length) return TEXT;
-            return colors[position];
+            if (position < 0 || position >= keys.length) return TEXT;
+            return SettingsPanel.colorOf(keys[position]);
         }
     }
 

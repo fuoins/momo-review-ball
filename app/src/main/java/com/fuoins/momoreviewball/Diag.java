@@ -17,6 +17,7 @@ import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.Locale;
 
@@ -114,7 +115,26 @@ final class Diag {
         synchronized (STAMP) {
             name = "momo_diag_" + STAMP.format(new Date()) + ".txt";
         }
-        return writeTo(activity, text, name);
+        File out = writeTo(activity, text, name);
+        if (out != null) prune(activity, 10);
+        return out;
+    }
+
+    /** 导出的文件只留最近 10 份，不然每点一次就多一个，时间久了会堆一堆。 */
+    private static void prune(Context ctx, int keep) {
+        try {
+            File dir = diagnoseDir(ctx);
+            if (dir == null) return;
+            File[] files = dir.listFiles((d, n) ->
+                    n.startsWith("momo_diag_") && n.endsWith(".txt"));
+            if (files == null || files.length <= keep) return;
+            Arrays.sort(files, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (int i = 0; i < files.length - keep; i++) {
+                //noinspection ResultOfMethodCallIgnored
+                files[i].delete();
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     /**
@@ -136,12 +156,19 @@ final class Diag {
         }
     }
 
+    private static File diagnoseDir(Context ctx) {
+        File base = ctx.getExternalFilesDir(null);
+        if (base == null) base = ctx.getFilesDir();
+        if (base == null) return null;
+        File dir = new File(base, "diagnose");
+        if (!dir.exists() && !dir.mkdirs()) return null;
+        return dir;
+    }
+
     private static File writeTo(Context ctx, String text, String name) {
         try {
-            File base = ctx.getExternalFilesDir(null);
-            if (base == null) base = ctx.getFilesDir();
-            File dir = new File(base, "diagnose");
-            if (!dir.exists() && !dir.mkdirs()) return null;
+            File dir = diagnoseDir(ctx);
+            if (dir == null) return null;
             File out = new File(dir, name);
             try (FileOutputStream fos = new FileOutputStream(out)) {
                 fos.write(text.getBytes(StandardCharsets.UTF_8));
@@ -150,19 +177,6 @@ final class Diag {
         } catch (Throwable t) {
             return null;
         }
-    }
-
-    /** 最近 n 条事件，直接显示在设置页里，点一下能看更多。 */
-    static String recent(int n) {
-        StringBuilder sb = new StringBuilder();
-        synchronized (LINES) {
-            int skip = Math.max(0, LINES.size() - n);
-            int i = 0;
-            for (String line : LINES) {
-                if (i++ >= skip) sb.append(line).append('\n');
-            }
-        }
-        return sb.length() == 0 ? "(暂无日志)" : sb.toString().trim();
     }
 
     static void copyToClipboard(Context context, String text) {
@@ -201,7 +215,8 @@ final class Diag {
         if (activity == null) return "?";
         try {
             Config c = Config.get(activity);
-            return "enabled=" + c.enabled + " locked=" + c.locked + " haptic=" + c.haptic
+            return "enabled=" + c.enabled + " locked=" + c.locked
+                    + " size=" + Math.round(c.scale * 100) + "%"
                     + " before=" + TextUtils.join("/", c.before)
                     + " after=" + TextUtils.join("/", c.after);
         } catch (Throwable t) {

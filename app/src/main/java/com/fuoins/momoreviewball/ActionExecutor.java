@@ -1,25 +1,17 @@
 package com.fuoins.momoreviewball;
 
 import android.app.Activity;
-import android.graphics.Color;
-import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.os.SystemClock;
-import android.text.TextUtils;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
-import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Locale;
-import java.util.regex.Pattern;
 
 /**
  * 动作执行器。
@@ -30,17 +22,6 @@ import java.util.regex.Pattern;
 public final class ActionExecutor {
 
     private static final String TAG = "MoMoBall";
-
-    private static final Pattern ENGLISH_WORD =
-            Pattern.compile("^[A-Za-z][A-Za-z'’\\-]*(?: [A-Za-z][A-Za-z'’\\-]*){0,2}$");
-
-    private static final String[] UI_BLACKLIST = {
-            "认识", "模糊", "忘记", "熟知", "发音", "显示单词", "瞄一眼", "上一个",
-            "返回上一个单词", "墨墨背单词", "复习", "设置", "取消", "确定", "完成",
-            "认识单词", "不认识"
-    };
-
-    private static WeakReference<TextView> peekViewRef;
 
     private ActionExecutor() {
     }
@@ -71,9 +52,6 @@ public final class ActionExecutor {
                 break;
             case Config.ACTION_SHOW:
                 ok = showAnswer(activity);
-                break;
-            case Config.ACTION_PEEK:
-                ok = peek(activity);
                 break;
             case Config.ACTION_PREV:
                 ok = previous(activity);
@@ -149,19 +127,6 @@ public final class ActionExecutor {
             return true;
         }
         return clickByIdKeyword(activity, new String[]{"prev", "undo"});
-    }
-
-    private static boolean peek(Activity activity) {
-        if (clickId(activity, "btn_peek_handwriting", "btn_peek_keyboard")) return true;
-        if (clickText(activity, new String[]{"瞄一眼"}, true)) {
-            return true;
-        }
-        String word = extractWord(activity);
-        if (!TextUtils.isEmpty(word)) {
-            showPeekOverlay(activity, word);
-            return true;
-        }
-        return false;
     }
 
     private static View findByIdName(Activity activity, String name) {
@@ -357,98 +322,6 @@ public final class ActionExecutor {
     private static String normalize(CharSequence text) {
         if (text == null) return "";
         return text.toString().replaceAll("[\\s\\u00A0\\u3000]+", "").trim();
-    }
-
-    /**
-     * 从视图树里猜当前单词：取字号最大的纯英文文本。
-     * 用于「瞄一眼」在应用本身没有可见按钮时，用悬浮气泡短暂显示。
-     */
-    private static String extractWord(Activity activity) {
-        ArrayList<TextView> views = new ArrayList<>();
-        collectTextViews(activity.getWindow().getDecorView(), views);
-        String best = null;
-        float bestSize = -1f;
-        for (TextView view : views) {
-            if (view.getVisibility() == View.GONE) continue;
-            CharSequence raw = view.getText();
-            if (raw == null) continue;
-            String text = raw.toString().trim();
-            if (text.length() < 2 || text.length() > 32) continue;
-            if (!ENGLISH_WORD.matcher(text).matches()) continue;
-            if (isBlacklisted(text)) continue;
-            if (text.equalsIgnoreCase("vip") || text.equalsIgnoreCase("ok")
-                    || text.equalsIgnoreCase("pdf")) {
-                continue;
-            }
-            float size = view.getTextSize();
-            if (size > bestSize) {
-                bestSize = size;
-                best = text;
-            }
-        }
-        return best;
-    }
-
-    private static boolean isBlacklisted(String text) {
-        for (String s : UI_BLACKLIST) {
-            if (text.equals(s)) return true;
-        }
-        return false;
-    }
-
-    private static void showPeekOverlay(Activity activity, String word) {
-        ViewGroup root = activity.findViewById(android.R.id.content);
-        if (root == null) return;
-
-        TextView old = peekViewRef == null ? null : peekViewRef.get();
-        if (old != null && old.getParent() == root) {
-            root.removeView(old);
-        }
-
-        TextView view = new TextView(activity);
-        view.setText(word);
-        view.setTextSize(30);
-        view.setTextColor(Color.WHITE);
-        view.setTypeface(Typeface.DEFAULT_BOLD);
-        view.setGravity(Gravity.CENTER);
-        int padH = dp(activity, 22);
-        int padV = dp(activity, 14);
-        view.setPadding(padH, padV, padH, padV);
-        view.setBackground(roundRect(0xEE2F3E6E, dp(activity, 18)));
-        view.setElevation(dp(activity, 12));
-
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        lp.gravity = Gravity.CENTER;
-        try {
-            root.addView(view, lp);
-        } catch (Throwable t) {
-            return;
-        }
-        peekViewRef = new WeakReference<>(view);
-        view.setAlpha(0f);
-        view.animate().alpha(1f).setDuration(120).start();
-
-        int duration = Config.get(activity).peekMs;
-        view.postDelayed(() -> {
-            view.animate().alpha(0f).setDuration(200).withEndAction(() -> {
-                try {
-                    if (view.getParent() == root) root.removeView(view);
-                } catch (Throwable ignored) {
-                }
-            }).start();
-        }, duration);
-    }
-
-    private static GradientDrawable roundRect(int color, int radius) {
-        GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(color);
-        drawable.setCornerRadius(radius);
-        return drawable;
-    }
-
-    private static int dp(Activity activity, int value) {
-        return Math.round(value * activity.getResources().getDisplayMetrics().density);
     }
 
     static void toast(Activity activity, String text) {

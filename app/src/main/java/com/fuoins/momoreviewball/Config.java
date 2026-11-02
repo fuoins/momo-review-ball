@@ -24,23 +24,41 @@ public final class Config {
     public static final String ACTION_FAMILIAR = "familiar";
     public static final String ACTION_PRONOUNCE = "pronounce";
     public static final String ACTION_SHOW = "show";
-    public static final String ACTION_PEEK = "peek";
     public static final String ACTION_PREV = "prev";
 
-    /** 设置页下拉框顺序 */
+    /** 全部动作。数组顺序固定，球心短标签按同一顺序取。 */
     public static final String[] ACTION_KEYS = {
             ACTION_NONE, ACTION_KNOW, ACTION_VAGUE, ACTION_FORGET, ACTION_FAMILIAR,
-            ACTION_PRONOUNCE, ACTION_SHOW, ACTION_PEEK, ACTION_PREV
+            ACTION_PRONOUNCE, ACTION_SHOW, ACTION_PREV
     };
     public static final String[] ACTION_LABELS = {
-            "无操作", "认识", "模糊", "忘记", "熟知", "发音", "显示单词", "瞄一眼", "返回上一个单词"
+            "无操作", "认识", "模糊", "忘记", "熟知", "发音", "显示单词", "返回上一个单词"
     };
+
+    /**
+     * 「单词出现前」能选的动作。
+     *
+     * <p>答案还没出来时根本没有「认识 / 模糊 / 忘记 / 熟知」这些按钮，选它们只会点空，
+     * 所以这里按阶段给两套独立的候选，而不是拿一张大表糊弄。
+     */
+    public static final String[] BEFORE_ACTIONS = {
+            ACTION_SHOW, ACTION_PRONOUNCE, ACTION_PREV, ACTION_NONE
+    };
+    /** 「单词出现后」能选的动作。「瞄一眼」对不上官方控件，已整条移除。 */
+    public static final String[] AFTER_ACTIONS = {
+            ACTION_KNOW, ACTION_VAGUE, ACTION_FORGET, ACTION_FAMILIAR,
+            ACTION_PRONOUNCE, ACTION_PREV, ACTION_NONE
+    };
+
+    /** 悬浮球自定义大小范围，1.0 = 墨墨原生尺寸。 */
+    public static final float SCALE_MIN = 0.6f;
+    public static final float SCALE_MAX = 1.5f;
 
     /** 手势顺序：单击、上滑、下滑、左滑、右滑 */
     public static final String[] GESTURE_LABELS = {"单击", "上滑", "下滑", "左滑", "右滑"};
 
     public static final String[] DEFAULT_BEFORE = {
-            ACTION_SHOW, ACTION_PRONOUNCE, ACTION_PEEK, ACTION_PREV, ACTION_NONE
+            ACTION_SHOW, ACTION_PRONOUNCE, ACTION_NONE, ACTION_PREV, ACTION_NONE
     };
     public static final String[] DEFAULT_AFTER = {
             ACTION_KNOW, ACTION_FAMILIAR, ACTION_FORGET, ACTION_VAGUE, ACTION_PREV
@@ -49,9 +67,8 @@ public final class Config {
     public boolean enabled = true;
     /** 锁定后悬浮球不可拖动，位置与拖动边界仍由墨墨自己管理。 */
     public boolean locked = false;
-    public boolean haptic = true;
-    public boolean diagnose = true;
-    public int peekMs = 1600;
+    /** 悬浮球缩放，1.0 为原生大小；由设置页滑杆调节，直接作用在球控件上。 */
+    public float scale = 1f;
     public String[] before = DEFAULT_BEFORE.clone();
     public String[] after = DEFAULT_AFTER.clone();
 
@@ -102,9 +119,7 @@ public final class Config {
     public void reset() {
         enabled = true;
         locked = false;
-        haptic = true;
-        diagnose = true;
-        peekMs = 1600;
+        scale = 1f;
         before = DEFAULT_BEFORE.clone();
         after = DEFAULT_AFTER.clone();
     }
@@ -117,14 +132,38 @@ public final class Config {
         return array[gestureIndex];
     }
 
+    /** 某个阶段可选的动作用于生成下拉框。 */
+    public static String[] actionsFor(boolean after) {
+        return after ? AFTER_ACTIONS : BEFORE_ACTIONS;
+    }
+
+    public static boolean allows(boolean after, String key) {
+        for (String option : actionsFor(after)) {
+            if (option.equals(key)) return true;
+        }
+        return false;
+    }
+
+    public static String labelOf(String key) {
+        for (int i = 0; i < ACTION_KEYS.length; i++) {
+            if (ACTION_KEYS[i].equals(key)) return ACTION_LABELS[i];
+        }
+        return key;
+    }
+
+    public static int indexOf(String[] options, String key) {
+        for (int i = 0; i < options.length; i++) {
+            if (options[i].equals(key)) return i;
+        }
+        return options.length - 1;   // 末位永远是「无操作」
+    }
+
     public String toJson() {
         JSONObject o = new JSONObject();
         try {
             o.put("enabled", enabled);
             o.put("locked", locked);
-            o.put("haptic", haptic);
-            o.put("diagnose", diagnose);
-            o.put("peekMs", peekMs);
+            o.put("scale", (double) scale);
             o.put("before", new JSONArray(Arrays.asList(before)));
             o.put("after", new JSONArray(Arrays.asList(after)));
         } catch (Throwable ignored) {
@@ -139,23 +178,26 @@ public final class Config {
             JSONObject o = new JSONObject(json);
             c.enabled = o.optBoolean("enabled", c.enabled);
             c.locked = o.optBoolean("locked", c.locked);
-            c.haptic = o.optBoolean("haptic", c.haptic);
-            c.diagnose = o.optBoolean("diagnose", c.diagnose);
-            c.peekMs = clamp(o.optInt("peekMs", c.peekMs), 600, 5000);
-            c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE);
-            c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER);
+            c.scale = clamp((float) o.optDouble("scale", 1.0), SCALE_MIN, SCALE_MAX);
+            c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE, false);
+            c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER, true);
         } catch (Throwable ignored) {
         }
         return c;
     }
 
-    private static String[] readArray(JSONArray array, String[] fallback) {
+    /**
+     * 解析一个阶段的手势数组。
+     *
+     * <p>旧版本存过「瞄一眼」以及「出现前用认识」这类组合，这里只把不合法的那一项
+     * 归零，不整组重置——否则升级一次就把用户配好的五个手势全清了。
+     */
+    private static String[] readArray(JSONArray array, String[] fallback, boolean after) {
         if (array == null || array.length() != 5) return fallback.clone();
         String[] out = new String[5];
         for (int i = 0; i < 5; i++) {
             String key = array.optString(i, ACTION_NONE);
-            if (!isValidAction(key)) return fallback.clone();
-            out[i] = key;
+            out[i] = allows(after, key) ? key : ACTION_NONE;
         }
         return out;
     }

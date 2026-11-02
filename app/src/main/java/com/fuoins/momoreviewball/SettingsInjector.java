@@ -121,6 +121,7 @@ public final class SettingsInjector {
         View panel = SettingsPanel.create(activity);
         panel.setTag(TAG);
         if (mergeWholePage(activity, root, recycler, panel)) {
+            scheduleHideNativeSizeItem(root);
             removeFloatingButton(root);
             return true;
         }
@@ -134,6 +135,7 @@ public final class SettingsInjector {
         // 次选：把页面列表搬进同一个滚动容器，模块配置紧接其后，
         // 整页只有一个滚动区，看起来就是原生设置项的延续
         if (mergeIntoScroll(activity, root, panel, recycler)) {
+            scheduleHideNativeSizeItem(root);
             removeFloatingButton(root);
             return true;
         }
@@ -166,6 +168,67 @@ public final class SettingsInjector {
         XposedLog.w("没找到可插入的位置，页面结构：" + describe(root));
         addFloatingButton(activity, root);
         return true;
+    }
+
+    /** 列表项是布局之后才有的，注入时立刻找多半是空的，等两拍再收。 */
+    private static void scheduleHideNativeSizeItem(View root) {
+        root.postDelayed(() -> hideNativeSizeItem(root), 350L);
+        root.postDelayed(() -> hideNativeSizeItem(root), 1000L);
+    }
+
+    /**
+     * 把原生那条「悬浮球尺寸」收起来。
+     *
+     * <p>模块给了自定义大小滑杆 + 实时预览，两个尺寸入口并排摆着只会互相打架：
+     * 用户改了原生尺寸，模块的百分比就失去参照。这里只在能准确定位到列表项时隐藏，
+     * 定位不到就保持原样，滑杆本身仍然生效（在原生尺寸之上再缩放）。
+     */
+    private static void hideNativeSizeItem(View root) {
+        try {
+            TextView title = findText(root, "悬浮球尺寸");
+            if (title == null) {
+                XposedLog.d("页面里没有「悬浮球尺寸」项，跳过隐藏");
+                return;
+            }
+            View item = title;
+            ViewParent parent = title.getParent();
+            int guard = 0;
+            while (parent instanceof ViewGroup && guard++ < 8
+                    && !parent.getClass().getName().endsWith("RecyclerView")) {
+                item = (View) parent;
+                parent = parent.getParent();
+            }
+            if (!(parent instanceof ViewGroup)
+                    || !parent.getClass().getName().endsWith("RecyclerView")) {
+                XposedLog.d("「悬浮球尺寸」不在列表里，保留原生项");
+                return;
+            }
+            if (item.getVisibility() == View.GONE && item.getHeight() == 0) return;  // 已经收过了
+            ViewGroup.LayoutParams lp = item.getLayoutParams();
+            if (lp != null) {
+                lp.height = 0;
+                item.setLayoutParams(lp);
+            }
+            item.setVisibility(View.GONE);
+            XposedLog.i("已隐藏原生「悬浮球尺寸」，改用自定义大小滑杆");
+        } catch (Throwable t) {
+            XposedLog.w("隐藏原生尺寸项失败", t);
+        }
+    }
+
+    private static TextView findText(View root, String text) {
+        if (root instanceof TextView) {
+            CharSequence value = ((TextView) root).getText();
+            if (value != null && text.equals(value.toString().trim())) return (TextView) root;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                TextView found = findText(group.getChildAt(i), text);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     /** 页面内容容器：优先滚动容器里的内容布局，其次第一个竖向 LinearLayout。 */

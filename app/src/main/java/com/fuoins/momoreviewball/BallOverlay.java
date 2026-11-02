@@ -2,13 +2,10 @@ package com.fuoins.momoreviewball;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.Color;
 import android.graphics.ColorFilter;
-import android.graphics.Paint;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
-import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.os.Handler;
 import android.os.Looper;
@@ -24,32 +21,14 @@ import java.util.List;
 /**
  * 盖在墨墨自带悬浮球上的一层「球面」。
  *
- * <p>绘制顺序刻意做成「先铺底、再画内容」：
- * <ol>
- *   <li>先用不透明底色画满整颗球，把原生球面上的方向图标、方向色环整个盖掉——
- *       之前只画四条细弧，原生的东西从弧线内外两头露出来，看起来就是「没盖住」；</li>
- *   <li>再沿球内壁画四段粗色带，颜色跟着「上/下/左/右」当前映射的动作走；</li>
- *   <li>最后在正中间写「单击」当前对应的动作，滑动时换成该方向将执行的动作。</li>
- * </ol>
- *
- * <p>几何一律以「控件里那颗真正的球」为准（{@code xj6} 224×224，居中），
- * 而不是控件的整个矩形——控件比球大一倍，按控件画会整整偏出一圈。
+ * <p>绘制交给 {@link BallPainter}，这里只负责：
+ * <ul>
+ *   <li>把 bounds 对齐到控件，并按控件里那颗真球（{@code xj6} 224×224）算出圆心半径；</li>
+ *   <li>跟踪「答案显示前 / 后」，切换用哪一套配色和文字；</li>
+ *   <li>滑动时把当前方向的色带加粗。</li>
+ * </ul>
  */
 final class BallOverlay extends Drawable {
-
-    private static final String[] SHORT_LABELS = {
-            "无", "认识", "模糊", "忘记", "熟知", "发音", "显示", "瞄一眼", "返回"
-    };
-
-    /** 上 / 下 / 左 / 右 四条色带的中心角（0° 在 3 点钟方向，顺时针）。 */
-    private static final float[] BAND_ANGLE = {270f, 90f, 180f, 0f};
-
-    /** 球面底色：盖住原生内容，同时保持球是浅色的，和墨墨整体风格一致。 */
-    private static final int BASE_COLOR = 0xFFF7F8FA;
-    private static final int BADGE_COLOR = 0xF21F2430;
-    private static final int EDGE_COLOR = 0x1A000000;
-    private static final int IDLE_COLOR = 0xFFDDE1E6;
-    private static final int NONE_COLOR = 0xFFB9C0CC;
 
     /** 评分栏还没出现时多久复查一次；配合显隐监听，正常切换几乎是即时的。 */
     private static final long POLL_MS = 200L;
@@ -59,14 +38,8 @@ final class BallOverlay extends Drawable {
     private static volatile boolean sRefreshPending;
 
     private final View host;
-    private final Paint arcPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint basePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint ringPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint edgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final BallPainter painter;
     private final RectF ball = new RectF();
-    private final RectF band = new RectF();
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private boolean after;
@@ -96,21 +69,7 @@ final class BallOverlay extends Drawable {
 
     BallOverlay(View host) {
         this.host = host;
-        Context context = host.getContext();
-        arcPaint.setStyle(Paint.Style.STROKE);
-        arcPaint.setStrokeCap(Paint.Cap.BUTT);
-        basePaint.setStyle(Paint.Style.FILL);
-        basePaint.setColor(BASE_COLOR);
-        badgePaint.setStyle(Paint.Style.FILL);
-        badgePaint.setColor(BADGE_COLOR);
-        ringPaint.setStyle(Paint.Style.STROKE);
-        ringPaint.setStrokeWidth(Math.max(1f, Util.dp(context, 1.6f)));
-        ringPaint.setColor(0xFFFFFFFF);
-        edgePaint.setStyle(Paint.Style.STROKE);
-        edgePaint.setStrokeWidth(Math.max(1f, Util.dp(context, 0.7f)));
-        edgePaint.setColor(EDGE_COLOR);
-        textPaint.setTextAlign(Paint.Align.CENTER);
-        textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+        this.painter = new BallPainter(host.getContext());
         synchronized (LIVE) {
             LIVE.add(new WeakReference<>(this));
         }
@@ -260,57 +219,7 @@ final class BallOverlay extends Drawable {
                     + "," + Math.round(cy) + ") 裁剪区=" + clip.width() + "x" + clip.height());
         }
 
-        // ① 不透明底盘：把原生的方向图标、方向色环整个盖掉
-        basePaint.setColor(BASE_COLOR);
-        basePaint.setAlpha(255);
-        canvas.drawCircle(cx, cy, radius, basePaint);
-        canvas.drawCircle(cx, cy, radius - edgePaint.getStrokeWidth() / 2f, edgePaint);
-
-        // ② 四段粗色带：贴着球内壁，位置正好压住原生那圈方向色。
-        //    墨墨原生的四色是「连成一整圈」的，所以这里也几乎连成整圈（每段 86°，缝 4°），
-        //    否则留白处会露出原生那一圈，看着就像没盖干净。
-        float bandWidth = radius * 0.28f;
-        float bandRadius = radius - bandWidth / 2f - radius * 0.01f;
-        band.set(cx - bandRadius, cy - bandRadius, cx + bandRadius, cy + bandRadius);
-
-        for (int i = 0; i < 4; i++) {
-            int gesture = i + 1;
-            String action = config.actionFor(after, gesture);
-            boolean idle = Config.ACTION_NONE.equals(action);
-            boolean active = highlight == gesture && progress > 0f;
-            boolean dim = highlight != 0 && !active;
-
-            arcPaint.setColor(idle ? IDLE_COLOR : SettingsPanel.colorOf(action));
-            arcPaint.setAlpha(dim ? 96 : 255);
-            arcPaint.setStrokeWidth(active ? bandWidth * (1f + 0.14f * progress) : bandWidth);
-
-            float sweep = active ? 82f + 14f * progress : 86f;
-            canvas.drawArc(band, BAND_ANGLE[i] - sweep / 2f, sweep, false, arcPaint);
-        }
-
-        // ③ 中心：静止时是「单击」的动作，滑动中换成该方向的动作。
-        //    底色直接取这个动作在设置页里的配色——认识就是绿、忘记就是红，
-        //    一眼就能看出现在点下去会发生什么；颜色跟着「出现前 / 出现后」一起变。
-        int shown = highlight > 0 ? highlight : 0;
-        String action = config.actionFor(after, shown);
-        String label = shortLabel(action);
-        if (label.isEmpty()) return;
-
-        float badgeRadius = radius * (highlight > 0 ? 0.44f : 0.40f);
-        badgePaint.setColor(Config.ACTION_NONE.equals(action)
-                ? NONE_COLOR : SettingsPanel.colorOf(action));
-        canvas.drawCircle(cx, cy, badgeRadius, badgePaint);
-
-        // 一圈白边，把中心和四周的色带分开，颜色再接近也看得清
-        canvas.drawCircle(cx, cy, badgeRadius - ringPaint.getStrokeWidth() / 2f, ringPaint);
-
-        float textSize = label.length() >= 3 ? badgeRadius * 0.56f : badgeRadius * 0.72f;
-        textPaint.setTextSize(textSize);
-        textPaint.setColor(Color.WHITE);
-
-        Paint.FontMetrics fm = textPaint.getFontMetrics();
-        float baseline = cy - (fm.ascent + fm.descent) / 2f;
-        canvas.drawText(label, cx, baseline, textPaint);
+        painter.draw(canvas, cx, cy, radius, config, after, highlight, progress);
     }
 
     /**
@@ -348,14 +257,7 @@ final class BallOverlay extends Drawable {
         return true;
     }
 
-    private String shortLabel(String action) {
-        for (int i = 0; i < Config.ACTION_KEYS.length; i++) {
-            if (Config.ACTION_KEYS[i].equals(action)) return SHORT_LABELS[i];
-        }
-        return "";
-    }
-
-    /** 评分栏可见即视为答案已显示，用于切换取自「出现前」还是「出现后」。 */
+    /** 当前是否已经显示答案：评分栏可见即视为已显示。 */
     private boolean detectAfter() {
         try {
             Context context = host.getContext();

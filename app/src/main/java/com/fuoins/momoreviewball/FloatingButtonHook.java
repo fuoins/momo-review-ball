@@ -3,7 +3,6 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.LayerDrawable;
-import android.view.HapticFeedbackConstants;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
@@ -16,7 +15,11 @@ import org.xmlpull.v1.XmlPullParser;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -50,6 +53,9 @@ public final class FloatingButtonHook {
 
     /** 已经挂过 dispatchTouchEvent 的类，避免重复 hook。 */
     private static final Set<Class<?>> DISPATCH_HOOKED = new HashSet<>();
+
+    /** 当前存活的球控件，用来在设置页拖动大小滑杆时即时改尺寸。 */
+    private static final List<WeakReference<View>> ATTACHED = new ArrayList<>();
 
     private static volatile boolean sClassHooked;
     private static volatile boolean sInflateHooked;
@@ -238,6 +244,7 @@ public final class FloatingButtonHook {
                 @Override
                 public void onViewAttachedToWindow(View v) {
                     overlay.start();
+                    applyScale(v);
                     v.invalidate();
                 }
 
@@ -262,6 +269,20 @@ public final class FloatingButtonHook {
         sFound = true;
         XposedLog.i("已代理自带悬浮球，原有 listener=" + handler.original);
 
+        // 尺寸：缩放整个球控件（连同挂在它上面的球面一起缩），
+        // 这样球面和真球永远严丝合缝，不会出现「颜色比球大一圈」。
+        synchronized (ATTACHED) {
+            boolean known = false;
+            for (Iterator<WeakReference<View>> it = ATTACHED.iterator(); it.hasNext(); ) {
+                View item = it.next().get();
+                if (item == null) it.remove();
+                else if (item == view) known = true;
+            }
+            if (!known) ATTACHED.add(new WeakReference<>(view));
+        }
+        applyScale(view);
+        view.post(() -> applyScale(view));
+
         // 球体几何诊断：控件本身比球大一倍，真实球的区域靠这段日志确认
         view.post(() -> {
             StringBuilder sb = new StringBuilder("球控件尺寸 ");
@@ -284,6 +305,41 @@ public final class FloatingButtonHook {
 
         // 复习页一出现就把日志落盘，设置页注入失败时也能从文件里拿到
         view.postDelayed(() -> Diag.flush(view.getContext()), 1500L);
+    }
+
+    /** 设置页拖动大小滑杆时调用：把新比例应用到还活着的球上。 */
+    static void applyScale() {
+        synchronized (ATTACHED) {
+            for (Iterator<WeakReference<View>> it = ATTACHED.iterator(); it.hasNext(); ) {
+                View view = it.next().get();
+                if (view == null) {
+                    it.remove();
+                } else {
+                    applyScale(view);
+                }
+            }
+        }
+    }
+
+    /** 以控件中心为轴缩放，位置和吸附结果都不会变。 */
+    private static void applyScale(View view) {
+        try {
+            // 还没量出尺寸时设缩放会把轴心落在左上角，球会整体偏移；等布局完再来
+            if (view.getWidth() <= 0 || view.getHeight() <= 0) return;
+            view.setPivotX(view.getWidth() / 2f);
+            view.setPivotY(view.getHeight() / 2f);
+
+            Config config = Config.get(view.getContext());
+            float target = Config.clamp(config.scale, Config.SCALE_MIN, Config.SCALE_MAX);
+            if (Math.abs(view.getScaleX() - target) < 0.001f
+                    && Math.abs(view.getScaleY() - target) < 0.001f) {
+                return;
+            }
+            view.setScaleX(target);
+            view.setScaleY(target);
+            XposedLog.i("悬浮球大小已应用：" + Math.round(target * 100) + "%");
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 兜底：foreground 不可用时退回 ViewOverlay，尺寸每次绘制前强制对齐控件。 */
@@ -506,6 +562,10 @@ public final class FloatingButtonHook {
             swiping = false;
             dragging = false;
             disallowParentIntercept(view, false);
+            // 原生的按压/回弹动画如果改的是 scale，播完会把自定义大小顶掉；
+            // 等它结束再按回去，两次是为了兼容动画时长不同的版本
+            view.postDelayed(() -> applyScale(view), 320L);
+            view.postDelayed(() -> applyScale(view), 900L);
         }
 
         /** 临时把「父容器不得抢事件」的权利拿到手，抬手就还回去。 */
@@ -540,16 +600,14 @@ public final class FloatingButtonHook {
             // 刚点完/滑完往往就是评分栏出现或消失的时机，多复查几次让球马上换配色
             overlay.kick();
 
-            if (ok) {
-                if (config.haptic) {
-                    v.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY);
+            if (!ok) {
+                if (Config.ACTION_FAMILIAR.equals(action)) {
+                    // 「熟知」不是默认按钮，点不到时直接把开关路径告诉用户
+                    ActionExecutor.toast(activity,
+                            "「熟知」需要先在 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
+                } else {
+                    ActionExecutor.toast(activity, "当前页面没有可用的「" + label(action) + "」控件");
                 }
-            } else if (Config.ACTION_FAMILIAR.equals(action)) {
-                // 「熟知」不是默认按钮，点不到时直接把开关路径告诉用户
-                ActionExecutor.toast(activity,
-                        "「熟知」需要先在 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
-            } else {
-                ActionExecutor.toast(activity, "当前页面没有可用的「" + label(action) + "」控件");
             }
         }
 
