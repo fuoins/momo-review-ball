@@ -125,59 +125,134 @@ public final class SettingsInjector {
     }
 
     /**
-     * 把页面列表（RecyclerView）搬进它下方那个滚动容器，再把模块配置接在末尾。
+     * 把页面列表和模块配置并进同一个滚动区。
      *
-     * <p>墨墨这页原本是「RecyclerView + ScrollView」两个独立滚动区，所以看起来像分了两页。
-     * 合并之后整页只有一个滚动区：原生设置项在上，模块配置紧接其下，中间没有分界。
+     * <p>分两种情况：
+     * <ul>
+     *   <li>页面本来就有滚动容器：把 RecyclerView 搬进它顶部，配置接在末尾；</li>
+     *   <li>页面没有滚动容器（墨墨 5.6 就是这样，只有绝对定位的 RecyclerView）：
+     *       新建一个 ScrollView 顶在列表原位，把「列表 + 配置」一起装进去。</li>
+     * </ul>
+     * 两种结果都是整页只有一个滚动区，配置紧接原生项，不再分成上下两块。
      */
     private static boolean mergeIntoScroll(Activity activity, ViewGroup root, View panel) {
         try {
-            View scroll = findScrollView(root);
-            if (!(scroll instanceof ViewGroup)) return false;
-            ViewGroup scrollGroup = (ViewGroup) scroll;
-            if (scrollGroup.getChildCount() == 0) return false;
-
-            View content = scrollGroup.getChildAt(0);
-            if (!(content instanceof LinearLayout)) return false;
-            LinearLayout column = (LinearLayout) content;
-
             View recycler = findRecycler(root);
-            if (recycler != null && recycler.getParent() != column) {
-                int recyclerTop = recycler.getTop();
-                int scrollTop = scroll.getTop();
+            if (recycler == null) return false;
 
-                ViewGroup oldParent = (ViewGroup) recycler.getParent();
-                if (oldParent != null) {
-                    oldParent.removeView(recycler);
-                }
-                try {
-                    recycler.setNestedScrollingEnabled(false);
-                } catch (Throwable ignored) {
-                }
-                column.addView(recycler, 0, new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-                // 滚动容器上移，填掉列表腾出来的位置，避免中间空一大块
-                ViewGroup.LayoutParams slp = scroll.getLayoutParams();
-                if (slp instanceof FrameLayout.LayoutParams && recyclerTop < scrollTop) {
-                    FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) slp;
-                    int delta = scrollTop - recyclerTop;
-                    flp.topMargin = Math.max(0, flp.topMargin - delta);
-                    if (flp.height > 0) {
-                        flp.height += delta;
-                    }
-                    scroll.setLayoutParams(flp);
-                }
+            View existing = findScrollView(root);
+            if (existing instanceof ViewGroup
+                    && mergeIntoExisting((ViewGroup) existing, recycler, panel)) {
+                return true;
             }
-
-            column.addView(panel, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-            XposedLog.i("已合并为单一滚动区：列表=" + (recycler != null)
-                    + "，容器子项=" + column.getChildCount());
-            return true;
+            return wrapRecycler(activity, recycler, panel);
         } catch (Throwable t) {
             XposedLog.w("合并滚动区失败：" + t, t);
             return false;
+        }
+    }
+
+    /** 页面已有滚动容器：把列表搬到它顶部，配置追加到末尾。 */
+    private static boolean mergeIntoExisting(ViewGroup scrollGroup, View recycler, View panel) {
+        if (scrollGroup.getChildCount() == 0) return false;
+        View content = scrollGroup.getChildAt(0);
+        if (!(content instanceof LinearLayout)) return false;
+        LinearLayout column = (LinearLayout) content;
+
+        if (recycler.getParent() != column) {
+            int recyclerTop = recycler.getTop();
+            int scrollTop = scrollGroup.getTop();
+
+            ViewGroup oldParent = (ViewGroup) recycler.getParent();
+            if (oldParent != null) oldParent.removeView(recycler);
+            stopNestedScroll(recycler);
+
+            column.addView(recycler, 0, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+            // 滚动容器上移，填掉列表腾出来的位置，避免中间空一大块
+            ViewGroup.LayoutParams slp = scrollGroup.getLayoutParams();
+            if (slp instanceof FrameLayout.LayoutParams && recyclerTop < scrollTop) {
+                FrameLayout.LayoutParams flp = (FrameLayout.LayoutParams) slp;
+                int delta = scrollTop - recyclerTop;
+                flp.topMargin = Math.max(0, flp.topMargin - delta);
+                if (flp.height > 0) flp.height += delta;
+                scrollGroup.setLayoutParams(flp);
+            }
+        }
+
+        column.addView(panel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        XposedLog.i("已合并到页面滚动区，容器子项=" + column.getChildCount());
+        return true;
+    }
+
+    /**
+     * 页面没有滚动容器时自建一个：顶替 RecyclerView 原来的位置，
+     * 上面是原生列表、下面是模块配置，一起滚动。
+     */
+    private static boolean wrapRecycler(Activity activity, View recycler, View panel) {
+        ViewGroup parent = (ViewGroup) recycler.getParent();
+        if (parent == null) return false;
+        // 只处理能直接给子 View 定绝对位置的容器，约束布局硬塞会跑到左上角
+        if (!(parent instanceof FrameLayout) && !(parent instanceof LinearLayout)) return false;
+
+        int index = parent.indexOfChild(recycler);
+        int top = recycler.getTop() - parent.getPaddingTop();
+        int limit = availableBottom(parent, recycler);
+        int height = limit - recycler.getTop();
+        if (height <= 0) return false;
+
+        parent.removeView(recycler);
+        stopNestedScroll(recycler);
+
+        LinearLayout column = new LinearLayout(activity);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.addView(recycler, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        column.addView(panel, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        ScrollView scroll = new ScrollView(activity);
+        scroll.setClipToPadding(false);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.addView(column, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        ViewGroup.LayoutParams lp;
+        if (parent instanceof FrameLayout) {
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, height);
+            flp.topMargin = Math.max(0, top);
+            lp = flp;
+        } else {
+            lp = new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, height);
+        }
+        parent.addView(scroll, Math.max(0, Math.min(index, parent.getChildCount())), lp);
+
+        XposedLog.i("已自建滚动区承载配置，top=" + top + " height=" + height
+                + "，父容器=" + parent.getClass().getSimpleName());
+        return true;
+    }
+
+    /** 列表下方最近的兄弟 View 视为可用区域的下边界（比如底部那个「禁用」开关）。 */
+    private static int availableBottom(ViewGroup parent, View recycler) {
+        int limit = parent.getHeight() - parent.getPaddingBottom();
+        for (int i = 0; i < parent.getChildCount(); i++) {
+            View sibling = parent.getChildAt(i);
+            if (sibling == recycler) continue;
+            int siblingTop = sibling.getTop();
+            if (siblingTop > recycler.getBottom() && siblingTop < limit) {
+                limit = siblingTop;
+            }
+        }
+        return limit;
+    }
+
+    private static void stopNestedScroll(View recycler) {
+        try {
+            recycler.setNestedScrollingEnabled(false);
+        } catch (Throwable ignored) {
         }
     }
 
