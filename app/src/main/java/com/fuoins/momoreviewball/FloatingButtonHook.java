@@ -194,26 +194,28 @@ public final class FloatingButtonHook {
                     if (!tracking) return forward(v, event);
                     float dx = event.getRawX() - downX;
                     float dy = event.getRawY() - downY;
-
-                    // 锁定位置：把坐标钉回按下点再转发，原生状态机照常跑，
-                    // 但球不会被拖走，边界自然也不会变
-                    if (config.locked && Math.hypot(dx, dy) > slop) {
-                        MotionEvent pinned = MotionEvent.obtain(event);
-                        pinned.offsetLocation(
-                                downViewX - event.getX(), downViewY - event.getY());
-                        boolean handled = forward(v, pinned);
-                        pinned.recycle();
-                        return handled;
-                    }
+                    float dist = (float) Math.hypot(dx, dy);
 
                     // 按住超过长按阈值后才开始移动 = 墨墨自己的「长按拖动」
                     // 位置、边界、吸附全部交还原生，模块不参与，避免把球拖出屏幕
                     if (!dragging && !config.locked
                             && SystemClock.uptimeMillis() - downAt >= longPressTimeout
-                            && Math.hypot(dx, dy) > slop) {
+                            && dist > slop) {
                         dragging = true;
                     }
-                    return forward(v, event);
+
+                    if (dragging) {
+                        return forward(v, event);
+                    }
+
+                    // 非拖动状态：把坐标钉回按下点再转发。
+                    // 原生因此认为手指一直没动，既不会触发它自己的滑动动作
+                    // （这是「有时候还是原来的」的根因），按压动画又照常保持。
+                    MotionEvent pinned = MotionEvent.obtain(event);
+                    pinned.offsetLocation(downViewX - event.getX(), downViewY - event.getY());
+                    boolean handled = forward(v, pinned);
+                    pinned.recycle();
+                    return handled;
                 }
 
                 case MotionEvent.ACTION_UP: {
