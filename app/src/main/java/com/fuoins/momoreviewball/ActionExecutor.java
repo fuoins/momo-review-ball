@@ -279,10 +279,10 @@ public final class ActionExecutor {
     private static int visibleTextColor(int color) {
         float[] hsv = new float[3];
         Color.colorToHSV(color, hsv);
-        if (hsv[2] > 0.92f) {
-            hsv[2] = 0.72f;
-        } else if (hsv[2] < 0.16f) {
-            hsv[2] = 0.42f;
+        if (hsv[2] > 0.99f) {
+            hsv[2] = 0.78f;
+        } else if (hsv[2] < 0.10f) {
+            hsv[2] = 0.45f;
         }
         return Color.HSVToColor(Color.alpha(color), hsv);
     }

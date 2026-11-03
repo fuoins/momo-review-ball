@@ -151,7 +151,7 @@ public final class Config {
             case ACTION_FORGET:
                 return 0xFFE53935;   // 红
             case ACTION_FAMILIAR:
-                return 0xFF00897B;   // 青
+                return 0xFF3B6EF6;   // 靛蓝
             case ACTION_PRONOUNCE:
                 return 0xFF8E44AD;   // 紫
             case ACTION_PREV:
