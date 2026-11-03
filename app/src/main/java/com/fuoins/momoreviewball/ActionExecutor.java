@@ -90,6 +90,8 @@ public final class ActionExecutor {
         if (activity == null) return false;
         Config config = Config.get(activity);
         if (!config.autoFamiliar || !config.usesFamiliar()) return false;
+        // 答案还没出来时评分栏是整体隐藏的，这时候把按钮翻出来会破坏页面状态
+        if (!isAnswerShown(activity)) return false;
 
         View button = findByIdName(activity, "iv_well_familiar");
         if (button == null) {
