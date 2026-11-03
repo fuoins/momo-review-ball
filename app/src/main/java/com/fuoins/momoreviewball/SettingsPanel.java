@@ -79,10 +79,11 @@ public final class SettingsPanel {
             }
             familiarNotice.setVisibility(View.VISIBLE);
             familiarNotice.setText(config.autoFamiliar
-                    ? "用到了「熟知」：模块会按住底部「认识」，等浮层出来后上划到「标记熟知」，"
-                        + "和你手动长按上划走的是同一条路径，不用去开墨墨的「标识熟知」。"
-                    : "用到了「熟知」：自动上划已关闭，需要自己在复习页长按底部「认识」，"
-                        + "上划到「标记熟知」；球上滑「熟知」不会执行。");
+                    ? "用到了「熟知」：答案出现后底栏会从「认识 / 模糊 / 忘记」变成四个，"
+                        + "多出的「熟知」点一下就标；悬浮球滑「熟知」也走同一个入口，"
+                        + "顶栏入口如果开着会优先点顶栏。"
+                    : "用到了「熟知」：底栏保持三个按钮，悬浮球只会找墨墨自己的顶栏「熟知」；"
+                        + "也可以手动长按底部「认识」上划到「标记熟知」。");
         };
 
         final TextView peekNotice = notice(activity,
@@ -120,13 +121,14 @@ public final class SettingsPanel {
             config.enabled = checked;
             config.save(activity);
         }));
-        card.addView(switchRow(activity, "底栏上划标记「熟知」", config.autoFamiliar, checked -> {
+        card.addView(switchRow(activity, "底栏添加「熟知」按钮", config.autoFamiliar, checked -> {
             config.autoFamiliar = checked;
             config.save(activity);
             syncNotice.run();
         }));
         card.addView(hint(activity,
-                "滑到「熟知」时，自动按住底部「认识」并上划到「标记熟知」；关掉后只能手动长按上划。"));
+                "开启后底栏变成「熟知 / 认识 / 模糊 / 忘记」四个，和原版三个按钮同排；"
+                        + "关掉则保持三个，悬浮球只尝试顶栏入口。"));
 
         card.addView(colorSection(activity, config, reloaders));
 

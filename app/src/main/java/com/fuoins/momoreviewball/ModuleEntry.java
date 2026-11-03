@@ -6,6 +6,7 @@ import android.content.Context;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
@@ -30,6 +31,7 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                 + " sdk=" + android.os.Build.VERSION.SDK_INT);
 
         FloatingButtonHook.install(lpparam.classLoader);
+        hookReviewFragment(lpparam.classLoader);
         hookApplicationOnCreate();
         hookActivityResume();
         hookWindowFocusChanged();
@@ -45,12 +47,36 @@ public class ModuleEntry implements IXposedHookLoadPackage {
                         Config.get(context);
                         // 加固应用的类可能晚于入口才可加载，这里补一次尝试。
                         FloatingButtonHook.install(context.getClassLoader());
+                        hookReviewFragment(context.getClassLoader());
                         XposedLog.i("初始化完成，配置已预读");
                     }, "momo-ball-init").start();
                 }
             });
         } catch (Throwable t) {
             XposedLog.e("hook Application.onCreate 失败", t);
+        }
+    }
+
+    /**
+     * 捕获复习页的 ReviewFragment，底栏「熟知」按钮点下去要直接调它的 X0。
+     *
+     * <p>这个类要等墨墨把复习页 inflate 出来才可加载，入口阶段可能还是 null，
+     * 所以 Application.onCreate 的补试线程里会再调一次。
+     */
+    private void hookReviewFragment(ClassLoader classLoader) {
+        try {
+            Class<?> clazz = XposedHelpers.findClassIfExists(
+                    "com.maimemo.android.momo.revision.ReviewFragment", classLoader);
+            if (clazz == null) return;
+            XposedBridge.hookAllMethods(clazz, "onViewCreated", new XC_MethodHook() {
+                @Override
+                protected void afterHookedMethod(MethodHookParam param) {
+                    ActionExecutor.setReviewFragment(param.thisObject);
+                }
+            });
+            XposedLog.i("已挂 ReviewFragment.onViewCreated");
+        } catch (Throwable t) {
+            XposedLog.w("hook ReviewFragment 失败 " + t);
         }
     }
 

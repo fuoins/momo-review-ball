@@ -3,7 +3,13 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.graphics.Rect;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
+import android.graphics.drawable.ColorDrawable;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
+import android.text.TextUtils;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -14,8 +20,15 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.util.TypedValue;
+import android.view.Gravity;
 import android.widget.Toast;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 
 import java.io.File;
 import java.util.ArrayList;
@@ -80,6 +93,338 @@ public final class ActionExecutor {
     private static long familiarGestureAt;
     private static boolean familiarGestureRunning;
 
+    private static final String TAG_BOTTOM_FAMILIAR = "momo_ball_familiar";
+
+    /** 复习页的 ReviewFragment；由 ModuleEntry hook onViewCreated 捕获。 */
+    private static volatile Object reviewFragment;
+
+    public static void setReviewFragment(Object fragment) {
+        if (fragment != null) reviewFragment = fragment;
+    }
+
+    /**
+     * 给底栏补一个「熟知」按钮，把「认识 / 模糊 / 忘记」三个变成四个。
+     *
+     * <p>底栏是 ConstraintLayout，三个按钮组成的是一条水平链（0dp 宽、互相约束）。
+     * 直接 addView 只会得到 0 宽，所以要把链拆开：认识.right 指到新按钮，
+     * 新按钮再指到模糊.left。字段名被 R8 混淆，这里按「值等于邻居 id」反查。
+     *
+     * <p>墨墨翻页会重建操作栏，由 {@link BallOverlay} 每 400ms 复查一次。
+     */
+    public static void ensureBottomFamiliar(Activity activity) {
+        if (activity == null) return;
+        Config config = Config.get(activity);
+        View barView = findByIdName(activity, "rev_operation_bar");
+        View existing = barView instanceof ViewGroup
+                ? findChildByTag((ViewGroup) barView, TAG_BOTTOM_FAMILIAR) : null;
+
+        if (!config.autoFamiliar) {
+            if (existing != null && existing.getParent() instanceof ViewGroup) {
+                ((ViewGroup) existing.getParent()).removeView(existing);
+                XposedLog.i("熟知：设置已关闭，移除底栏「熟知」按钮");
+            }
+            return;
+        }
+        if (!(barView instanceof ViewGroup)) return;
+        ViewGroup bar = (ViewGroup) barView;
+        if (existing != null) return;
+
+        View famView = findByIdName(activity, "rev_familiar");
+        View vagueView = findByIdName(activity, "rev_vague");
+        if (!(famView instanceof TextView) || vagueView == null) return;
+        if (famView.getParent() != bar || vagueView.getParent() != bar) return;
+        if (famView.getWidth() <= 0 || famView.getHeight() <= 0) return;
+
+        TextView src = (TextView) famView;
+        boolean ok;
+        if (bar instanceof LinearLayout) {
+            ok = injectLinear(activity, bar, src);
+        } else {
+            ok = injectConstraint(activity, bar, src, vagueView);
+        }
+        if (!ok) {
+            XposedLog.w("熟知：底栏注入失败，操作栏=" + bar.getClass().getName()
+                    + " lp=" + (src.getLayoutParams() == null ? "null"
+                    : src.getLayoutParams().getClass().getName()));
+        }
+    }
+
+    /** ConstraintLayout 版：拆链、插按钮、重新接链。 */
+    private static boolean injectConstraint(Activity activity, ViewGroup bar,
+                                            TextView src, View vague) {
+        ViewGroup.LayoutParams srcLp = src.getLayoutParams();
+        ViewGroup.LayoutParams vagueLp = vague.getLayoutParams();
+        if (srcLp == null || vagueLp == null) return false;
+        Class<?> lpClass = srcLp.getClass();
+        int famId = src.getId();
+        int vagueId = vague.getId();
+        if (famId == View.NO_ID || vagueId == View.NO_ID) return false;
+
+        // 认识.right -> 模糊.left 的那个字段；模糊.left -> 认识.right 的那个字段
+        Field rightField = findIntField(lpClass, srcLp, vagueId);
+        Field leftField = findIntField(lpClass, vagueLp, famId);
+        if (rightField == null || leftField == null) {
+            XposedLog.w("熟知：约束字段没找到 right=" + rightField + " left=" + leftField
+                    + " lp=" + lpClass.getName());
+            return false;
+        }
+
+        TextView button = buildButton(activity, src);
+        int newId = View.generateViewId();
+        button.setId(newId);
+
+        try {
+            Object ourLp = copyLp(lpClass, vagueLp, 0, vagueLp.height);
+            rightField.setInt(ourLp, vagueId);   // our.right -> 模糊.left
+            leftField.setInt(ourLp, famId);      // our.left  -> 认识.right
+
+            rightField.setInt(srcLp, newId);     // 认识.right -> our.left
+            src.setLayoutParams(srcLp);
+            leftField.setInt(vagueLp, newId);    // 模糊.left  -> our.right
+            vague.setLayoutParams(vagueLp);
+
+            bar.addView(button, (ViewGroup.LayoutParams) ourLp);
+        } catch (Throwable t) {
+            XposedLog.w("熟知：约束改写失败 " + t);
+            return false;
+        }
+        bar.requestLayout();
+        XposedLog.i("熟知：底栏已补上第四个按钮（ConstraintLayout），字段="
+                + leftField.getName() + "/" + rightField.getName()
+                + " 操作栏宽=" + bar.getWidth());
+        logButtonLater(button, bar);
+        return true;
+    }
+
+    /** 线性布局兜底：按权重均分。 */
+    private static boolean injectLinear(Activity activity, ViewGroup bar, TextView src) {
+        ViewGroup.LayoutParams srcLp = src.getLayoutParams();
+        if (srcLp == null) return false;
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, srcLp.height, 1f);
+        if (srcLp instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams from = (LinearLayout.LayoutParams) srcLp;
+            lp.gravity = from.gravity;
+            lp.leftMargin = from.leftMargin;
+            lp.rightMargin = from.rightMargin;
+            lp.topMargin = from.topMargin;
+            lp.bottomMargin = from.bottomMargin;
+        }
+        TextView button = buildButton(activity, src);
+        bar.addView(button, 0, lp);
+        bar.requestLayout();
+        XposedLog.i("熟知：底栏已补上第四个按钮（LinearLayout） 操作栏宽=" + bar.getWidth());
+        logButtonLater(button, bar);
+        return true;
+    }
+
+    private static TextView buildButton(Activity activity, TextView src) {
+        Config config = Config.get(activity);
+        int color = config.colorOf(Config.ACTION_FAMILIAR);
+
+        TextView button = new TextView(activity);
+        button.setText("熟知");
+        button.setTag(TAG_BOTTOM_FAMILIAR);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_PX, src.getTextSize());
+        button.setTypeface(src.getTypeface());
+        button.setGravity(src.getGravity());
+        button.setIncludeFontPadding(true);
+        button.setPadding(src.getPaddingLeft(), src.getPaddingTop(),
+                src.getPaddingRight(), src.getPaddingBottom());
+        button.setTextColor(color);
+        button.setSingleLine(true);
+        button.setEllipsize(TextUtils.TruncateAt.END);
+        button.setClickable(true);
+        button.setFocusable(true);
+        styleButton(button, src, color, activity.getResources());
+        button.setOnClickListener(v -> {
+            Activity owner = Util.findActivity(v.getContext());
+            if (owner != null) markFamiliar(owner);
+        });
+        return button;
+    }
+
+    /** 克隆「认识」的圆角描边背景并染成熟知色，再补一个按压态。 */
+    private static void styleButton(TextView button, TextView src, int color,
+                                    android.content.res.Resources res) {
+        float density = res.getDisplayMetrics().density;
+        int radius = (int) (10f * density + 0.5f);
+        int stroke = Math.max(1, (int) (2f * density + 0.5f));
+        try {
+            Drawable bg = src.getBackground();
+            if (bg != null && bg.getConstantState() != null) {
+                Drawable copy = bg.getConstantState().newDrawable(res).mutate();
+                copy.setColorFilter(new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN));
+                button.setBackground(copy);
+            } else {
+                button.setBackground(roundStroke(radius, stroke, color, 0));
+            }
+        } catch (Throwable t) {
+            button.setBackground(roundStroke(radius, stroke, color, 0));
+        }
+        try {
+            StateListDrawable fg = new StateListDrawable();
+            fg.addState(new int[]{android.R.attr.state_pressed},
+                    roundStroke(radius, stroke, color, (color & 0x00FFFFFF) | 0x1A000000));
+            fg.addState(new int[0], new ColorDrawable(0));
+            button.setForeground(fg);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static GradientDrawable roundStroke(int radius, int stroke, int color, int fill) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.RECTANGLE);
+        g.setCornerRadius(radius);
+        g.setStroke(stroke, color);
+        g.setColor(fill);
+        return g;
+    }
+
+    private static final String[] LP_SKIP_FIELDS = {
+            "width", "height", "leftMargin", "rightMargin", "topMargin", "bottomMargin",
+            "marginStart", "marginEnd", "gravity", "horizontalWeight"
+    };
+
+    /** 在 LayoutParams 的 public int 字段里找值等于 value 的那个（即指向 value 的约束）。 */
+    private static Field findIntField(Class<?> cls, Object lp, int value) {
+        Field found = null;
+        String foundName = null;
+        for (Field f : cls.getFields()) {
+            if (f.getType() != int.class) continue;
+            String name = f.getName();
+            boolean skip = false;
+            for (String s : LP_SKIP_FIELDS) {
+                if (s.equals(name)) {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip) continue;
+            try {
+                if (f.getInt(lp) != value) continue;
+            } catch (Throwable ignored) {
+                continue;
+            }
+            if (found == null) {
+                found = f;
+                foundName = name;
+            } else {
+                XposedLog.d("熟知：约束字段有歧义 " + value + ": " + foundName + " / " + name);
+            }
+        }
+        return found;
+    }
+
+    private static Object copyLp(Class<?> cls, Object src, int width, int height) throws Throwable {
+        Constructor<?> ctor = cls.getConstructor(int.class, int.class);
+        Object dst = ctor.newInstance(width, height);
+        for (Field f : cls.getFields()) {
+            if (f.getType() != int.class) continue;
+            try {
+                f.setInt(dst, f.getInt(src));
+            } catch (Throwable ignored) {
+            }
+        }
+        ViewGroup.LayoutParams d = (ViewGroup.LayoutParams) dst;
+        d.width = width;
+        d.height = height;
+        return dst;
+    }
+
+    private static void logButtonLater(View button, ViewGroup bar) {
+        button.postDelayed(() -> {
+            if (button.isAttachedToWindow()) {
+                XposedLog.i("熟知：底栏按钮 300ms 后 " + describe(button)
+                        + " 操作栏宽=" + bar.getWidth());
+            }
+        }, 300L);
+    }
+
+    private static View findChildByTag(ViewGroup parent, Object tag) {
+        for (int i = 0; i < parent.getChildCount(); i++) {
+            View child = parent.getChildAt(i);
+            if (tag.equals(child.getTag())) return child;
+        }
+        return null;
+    }
+
+    private static boolean isReallyVisible(View view) {
+        return view != null && view.isShown() && view.getAlpha() > 0.99f
+                && view.getWidth() > 0 && view.getHeight() > 0;
+    }
+
+    /**
+     * 直接调用墨墨自己的应答链路：{@code ReviewFragment.X0(WELL_FAMILIAR.value, false)}。
+     *
+     * <p>和顶栏「标识熟知」图标、长按认识上划是同一个入口，不会漏掉弹窗/埋点/统计。
+     * 方法名是 R8 混淆后的，换版本可能变；失败就返回 false，由调用方退回手势。
+     */
+    private static boolean invokeWellFamiliar() {
+        Object fragment = reviewFragment;
+        if (fragment == null) return false;
+        try {
+            int value = 4;
+            try {
+                Class<?> rr = Class.forName("com.maimemo.android.momo.revision.ReviewResponse",
+                        false, fragment.getClass().getClassLoader());
+                Object[] constants = rr.getEnumConstants();
+                if (constants != null) {
+                    for (Object c : constants) {
+                        if ("WELL_FAMILIAR".equals(((Enum<?>) c).name())) {
+                            value = rr.getField("value").getInt(c);
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                XposedLog.d("熟知：读 ReviewResponse 失败，用 fallback " + value + "：" + t);
+            }
+
+            Method x0 = findMethod(fragment.getClass(), "X0", int.class, boolean.class);
+            if (x0 != null) {
+                x0.setAccessible(true);
+                x0.invoke(fragment, value, false);
+                XposedLog.i("熟知：已调用 ReviewFragment.X0(" + value + ", false)");
+                return true;
+            }
+            Method g0 = findStaticWithInstance(fragment.getClass(), "G0", fragment);
+            if (g0 != null) {
+                g0.setAccessible(true);
+                g0.invoke(null, fragment, true, true);
+                XposedLog.i("熟知：已调用 ReviewFragment.G0(fragment, true, true)");
+                return true;
+            }
+            XposedLog.w("熟知：ReviewFragment 里没有 X0/G0，退回手势");
+        } catch (Throwable t) {
+            XposedLog.w("熟知：调用原生标记失败 " + t);
+        }
+        return false;
+    }
+
+    private static Method findMethod(Class<?> cls, String name, Class<?>... params) {
+        for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                return c.getDeclaredMethod(name, params);
+            } catch (Throwable ignored) {
+            }
+        }
+        return null;
+    }
+
+    private static Method findStaticWithInstance(Class<?> cls, String name, Object instance) {
+        for (Class<?> c = cls; c != null && c != Object.class; c = c.getSuperclass()) {
+            for (Method m : c.getDeclaredMethods()) {
+                if (!m.getName().equals(name)) continue;
+                Class<?>[] ps = m.getParameterTypes();
+                if (ps.length == 3 && ps[0].isInstance(instance)
+                        && ps[1] == boolean.class && ps[2] == boolean.class) {
+                    return m;
+                }
+            }
+        }
+        return null;
+    }
+
     /**
      * 标记「熟知」。
      *
@@ -92,11 +437,17 @@ public final class ActionExecutor {
     public static boolean markFamiliar(Activity activity) {
         if (activity == null) return false;
         Config config = Config.get(activity);
-        if (!config.autoFamiliar) {
-            return clickId(activity, "iv_well_familiar")
-                    || clickByDescription(activity, new String[]{"熟知"})
-                    || clickText(activity, new String[]{"熟知", "熟悉"}, true);
+        // 顶栏入口如果被墨墨放出来了，直接点它；没有就走底栏「认识」的长按上划。
+        // 两个入口开哪个都能用，这里是「谁在就点谁」。
+        View top = findByIdName(activity, "iv_well_familiar");
+        if (isReallyVisible(top) && top.performClick()) {
+            XposedLog.i("熟知：点了顶栏入口 " + describe(top));
+            return true;
         }
+        if (!config.autoFamiliar) return false;
+        // 底栏「熟知」按钮/悬浮球共用：优先走墨墨自己的应答链路，
+        // 版本对不上（X0 改名）再退回长按上划的手势。
+        if (invokeWellFamiliar()) return true;
         View know = findByIdName(activity, "rev_familiar");
         if (know == null || !know.isShown() || know.getWidth() <= 0 || know.getHeight() <= 0) {
             return clickId(activity, "iv_well_familiar");

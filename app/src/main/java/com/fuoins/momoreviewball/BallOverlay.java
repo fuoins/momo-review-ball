@@ -52,7 +52,8 @@ final class BallOverlay extends Drawable {
     private int seenRevision = -1;
     private int barId;
     private WeakReference<View> barRef;
-    /** 上次维护「熟知」按钮的时间；答案显示期间每 400ms 复查一次。 */
+    /** 上次维护底栏「熟知」按钮的时间；答案显示期间每 400ms 复查一次。 */
+    private long lastFamiliarCheck;
 
     private final Runnable clearHighlight = () -> {
         highlight = 0;
@@ -137,6 +138,17 @@ final class BallOverlay extends Drawable {
             after = now;
             refresh();
         }
+        if (!now) {
+            lastFamiliarCheck = 0L;
+            return;
+        }
+        // 墨墨每次翻页都会重建操作栏，补上的第四个按钮也跟着没了；
+        // 400ms 复查一次，比 Hook 布局变化简单，开销也只是一次 findViewById。
+        long uptime = android.os.SystemClock.uptimeMillis();
+        if (uptime - lastFamiliarCheck < 400L) return;
+        lastFamiliarCheck = uptime;
+        Activity activity = Util.findActivity(host.getContext());
+        if (activity != null) ActionExecutor.ensureBottomFamiliar(activity);
     }
 
     /**
