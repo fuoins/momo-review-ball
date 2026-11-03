@@ -238,7 +238,10 @@ public final class ActionExecutor {
         styleButton(button, src, color, activity.getResources());
         button.setOnClickListener(v -> {
             Activity owner = Util.findActivity(v.getContext());
-            if (owner != null) markFamiliar(owner);
+            if (owner == null) return;
+            if (!markFamiliar(owner)) {
+                toast(owner, "「熟知」没有执行：请先显示答案，再点这个按钮");
+            }
         });
         return button;
     }

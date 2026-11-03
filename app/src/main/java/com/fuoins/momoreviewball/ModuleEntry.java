@@ -63,20 +63,44 @@ public class ModuleEntry implements IXposedHookLoadPackage {
      * <p>这个类要等墨墨把复习页 inflate 出来才可加载，入口阶段可能还是 null，
      * 所以 Application.onCreate 的补试线程里会再调一次。
      */
-    private void hookReviewFragment(ClassLoader classLoader) {
+    private static volatile boolean reviewFragmentHooked;
+
+    private void hookReviewFragment(final ClassLoader classLoader) {
+        if (tryHookReviewFragment(classLoader)) return;
+        // 加固应用的类可能晚于入口才解密，轮询等它出现。
+        new Thread(() -> {
+            for (int i = 0; i < 30 && !reviewFragmentHooked; i++) {
+                try {
+                    Thread.sleep(500L);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                try {
+                    if (tryHookReviewFragment(classLoader)) return;
+                } catch (Throwable ignored) {
+                }
+            }
+        }, "momo-ball-fragment").start();
+    }
+
+    private static synchronized boolean tryHookReviewFragment(ClassLoader classLoader) {
+        if (reviewFragmentHooked) return true;
         try {
             Class<?> clazz = XposedHelpers.findClassIfExists(
                     "com.maimemo.android.momo.revision.ReviewFragment", classLoader);
-            if (clazz == null) return;
+            if (clazz == null) return false;
             XposedBridge.hookAllMethods(clazz, "onViewCreated", new XC_MethodHook() {
                 @Override
                 protected void afterHookedMethod(MethodHookParam param) {
                     ActionExecutor.setReviewFragment(param.thisObject);
                 }
             });
+            reviewFragmentHooked = true;
             XposedLog.i("已挂 ReviewFragment.onViewCreated");
+            return true;
         } catch (Throwable t) {
             XposedLog.w("hook ReviewFragment 失败 " + t);
+            return false;
         }
     }
 
