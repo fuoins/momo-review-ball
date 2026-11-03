@@ -53,7 +53,6 @@ final class BallOverlay extends Drawable {
     private int barId;
     private WeakReference<View> barRef;
     /** 上次维护「熟知」按钮的时间；答案显示期间每 400ms 复查一次。 */
-    private long lastFamiliarCheck;
 
     private final Runnable clearHighlight = () -> {
         highlight = 0;
@@ -138,18 +137,6 @@ final class BallOverlay extends Drawable {
             after = now;
             refresh();
         }
-
-        if (!now) {
-            lastFamiliarCheck = 0L;
-            return;
-        }
-        // 答案显示期间持续维护「熟知」按钮：墨墨翻页、刷新时会按自己的
-        // 「标识熟知」设置重新把它藏起来，只翻一次不够。
-        long uptime = android.os.SystemClock.uptimeMillis();
-        if (uptime - lastFamiliarCheck < 400L) return;
-        lastFamiliarCheck = uptime;
-        Activity activity = Util.findActivity(host.getContext());
-        if (activity != null) ActionExecutor.ensureFamiliarVisible(activity);
     }
 
     /**

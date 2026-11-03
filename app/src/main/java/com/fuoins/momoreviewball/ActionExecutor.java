@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Rect;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
@@ -50,11 +52,7 @@ public final class ActionExecutor {
                         || clickText(activity, new String[]{"忘记"}, true);
                 break;
             case Config.ACTION_FAMILIAR:
-                // 先确保按钮可见，再点；否则 GONE 的按钮会被 clickId 的 isShown 过滤掉
-                ensureFamiliarVisible(activity);
-                ok = clickId(activity, "iv_well_familiar")
-                        || clickByDescription(activity, new String[]{"熟知"})
-                        || clickText(activity, new String[]{"熟知", "熟悉"}, true);
+                ok = markFamiliar(activity);
                 break;
             case Config.ACTION_PRONOUNCE:
                 ok = pronounce(activity);
@@ -78,195 +76,103 @@ public final class ActionExecutor {
         return ok;
     }
 
-    private static boolean familiarLoggedMissing;
-    private static boolean familiarStillHidden;
-    private static boolean familiarChainLogged;
-    private static boolean familiarLayoutLogged;
-    private static boolean familiarPrefsDumped;
-    private static boolean familiarAlphaLogged;
-    /** 操作栏与「熟知」按钮的缓存：答案显示期间要反复复查，不能每次都遍历视图树。 */
-    private static java.lang.ref.WeakReference<View> familiarBarRef;
-    private static java.lang.ref.WeakReference<View> familiarButtonRef;
+    /** 上一次「熟知」手势的时间；手势执行中不接第二次，避免翻页瞬间连点两下。 */
+    private static long familiarGestureAt;
+    private static boolean familiarGestureRunning;
 
     /**
-     * 让复习页底部的「熟知」按钮显示出来。
+     * 标记「熟知」。
      *
-     * <p>墨墨关闭「标识熟知」时，按钮通常没有被移除，只是 visibility 为 GONE；
-     * 更麻烦的是它每次翻页、刷新都会按自己的设置再藏一次，所以这里不能只做一次，
-     * 而是由 {@link BallOverlay} 在答案显示期间反复调用，藏一次就翻回来。
+     * <p>墨墨底栏只有「认识 / 模糊 / 忘记」，「熟知」藏在「认识」的长按手势里：
+     * 按住「认识」不动，等浮层出来，再往上滑到「标记熟知」松手。这里复现整套手势，
+     * 而不是去翻顶部工具栏那个被墨墨按设置藏起来的图标。
      *
-     * <p>只在复习页（存在 {@code rev_cl_operation_bar}）并且答案已经出现时动手。
-     * 设置页、单词列表页里也有「熟知」两个字，照着文字找会翻错控件。
+     * <p>答案没出现时底栏还没有「认识」按钮，这时退回顶部入口（如果墨墨自己露出来了）。
      */
-    public static boolean ensureFamiliarVisible(Activity activity) {
+    public static boolean markFamiliar(Activity activity) {
         if (activity == null) return false;
         Config config = Config.get(activity);
-        if (!config.autoFamiliar || !config.usesFamiliar()) return false;
-
-        View bar = resolveOperationBar(activity);
-        // 没有操作栏就不是复习页；操作栏不可见说明答案还没出来
-        if (bar == null || !bar.isShown()) return false;
-
-        View button = familiarButtonRef == null ? null : familiarButtonRef.get();
-        if (button == null || !button.isAttachedToWindow()) {
-            button = findByIdName(activity, "iv_well_familiar");
-            if (button == null) button = findFamiliarInBar(bar);
-            if (button == null) {
-                if (!familiarLoggedMissing) {
-                    familiarLoggedMissing = true;
-                    XposedLog.w("熟知：操作栏里找不到「熟知」按钮，需要去更多设置打开「标识熟知」");
-                    dumpBar(bar);
-                }
-                return false;
-            }
-            familiarButtonRef = new java.lang.ref.WeakReference<>(button);
+        if (!config.autoFamiliar) {
+            return clickId(activity, "iv_well_familiar")
+                    || clickByDescription(activity, new String[]{"熟知"})
+                    || clickText(activity, new String[]{"熟知", "熟悉"}, true);
         }
-        // isShown() 只说明「自己和祖先都是 VISIBLE」，不代表屏幕上真有东西：
-        // 墨墨藏这个按钮时用的是 alpha 动画，播完 alpha 可能是 0，
-        // 刚设回 VISIBLE 的那一帧宽高也还是 0。三个条件都满足才算真的露出来。
-        if (button.isShown() && button.getAlpha() > 0.99f
-                && button.getWidth() > 0 && button.getHeight() > 0) {
-            return true;
+        View know = findByIdName(activity, "rev_familiar");
+        if (know == null || !know.isShown() || know.getWidth() <= 0 || know.getHeight() <= 0) {
+            return clickId(activity, "iv_well_familiar");
         }
-        return revealFamiliar(button, bar);
-    }
-
-    /** 复习页的操作栏；页面重建后引用失效，会重新查一次。 */
-    private static View resolveOperationBar(Activity activity) {
-        View decor = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
-        View bar = familiarBarRef == null ? null : familiarBarRef.get();
-        // 缓存必须属于当前页面：从复习页切到设置页时，旧页面的操作栏可能还挂着，
-        // 但它不是用户正在看的那个，不能拿来判断
-        if (bar != null && bar.isAttachedToWindow() && bar.getRootView() == decor) return bar;
-        bar = findByIdName(activity, "rev_cl_operation_bar");
-        if (bar != null) familiarBarRef = new java.lang.ref.WeakReference<>(bar);
-        return bar;
+        long now = SystemClock.uptimeMillis();
+        if (familiarGestureRunning || now - familiarGestureAt < 1200L) return true;
+        familiarGestureAt = now;
+        startFamiliarGesture(activity, know);
+        return true;
     }
 
     /**
-     * 把「熟知」按钮和它上面每一层被藏起来的容器都翻出来。
+     * 按住「认识」→ 等长按浮层 → 上划 → 松手。
      *
-     * <p>只翻到操作栏为止，不碰操作栏本身。之前只处理直接父容器，遇到
-     * 「按钮 VISIBLE、再上一层 GONE」的布局就会出现「日志说设成可见了、屏幕上却没有」。
+     * <p>整个序列必须由模块自己发 MotionEvent：墨墨的「上划标记熟知」是按钮自己的
+     * 触摸逻辑，performClick / performLongClick 都不会走那条分支。
      */
-    private static boolean revealFamiliar(View button, View bar) {
-        StringBuilder chain = new StringBuilder();
-        View cur = button;
-        int guard = 0;
-        boolean changed = false;
-        while (cur != null && cur != bar && guard++ < 12) {
-            chain.append(idName(cur)).append('=').append(visibilityName(cur.getVisibility())).append(" < ");
-            if (cur.getVisibility() != View.VISIBLE) {
-                cur.setVisibility(View.VISIBLE);
-                changed = true;
-            }
-            ViewParent parent = cur.getParent();
-            cur = parent instanceof View ? (View) parent : null;
-        }
-        // 墨墨隐藏工具栏图标用的是 alpha 动画；只改 visibility 会留下一个
-        // 「isShown()=true 但 alpha=0」的幽灵按钮，屏幕上什么都看不到。
-        boolean alphaFixed = false;
-        if (button.getAlpha() < 0.99f) {
-            button.animate().cancel();
-            button.setAlpha(1f);
-            alphaFixed = true;
-        }
-        if (changed) {
-            XposedLog.i("熟知：已翻开 " + chain + "按钮 " + describe(button));
-        } else if (alphaFixed && !familiarAlphaLogged) {
-            familiarAlphaLogged = true;
-            XposedLog.i("熟知：按钮被 alpha 动画藏住了，已恢复到 1.0；" + describe(button));
-        } else if (!changed && !alphaFixed && !familiarChainLogged) {
-            // 整条链都可见、alpha 也正常却仍没尺寸：多半是被布局挤成了 0
-            familiarChainLogged = true;
-            XposedLog.w("熟知：按钮链都可见但仍不可见 " + chain + "按钮 " + describe(button));
-        }
-
-        // 刚设回 VISIBLE 的这一帧还没 measure，宽高必然是 0；350ms 后把最终
-        // 布局参数和屏幕位置打出来，用来判断是「没排上」还是「排到屏幕外」。
-        if (!familiarLayoutLogged) {
-            final java.lang.ref.WeakReference<View> layoutRef =
-                    new java.lang.ref.WeakReference<>(button);
-            button.postDelayed(() -> logFamiliarLayout(layoutRef.get()), 350L);
-        }
-
-        // 墨墨可能在下一帧按自己的数据再藏一次，300ms 后复查一次。
-        // 真的还不可见就只记一条日志（BallOverlay 会继续每 400ms 翻一次，不要在这里递归刷屏）。
-        final java.lang.ref.WeakReference<View> ref = new java.lang.ref.WeakReference<>(button);
-        button.postDelayed(() -> {
-            View b = ref.get();
-            if (b != null && b.isAttachedToWindow() && !b.isShown() && !familiarStillHidden) {
-                familiarStillHidden = true;
-                XposedLog.w("熟知：翻开后仍不可见，父链 " + parentChain(b));
-            }
-        }, 300L);
-        return button.isShown();
-    }
-
-    /** 350ms 后按钮的最终状态：宽高、布局参数、屏幕坐标、可见区。 */
-    private static void logFamiliarLayout(View button) {
-        if (button == null || !button.isAttachedToWindow() || familiarLayoutLogged) return;
-        familiarLayoutLogged = true;
-        int[] loc = new int[2];
-        button.getLocationOnScreen(loc);
-        Rect visible = new Rect();
-        boolean onScreen = button.getGlobalVisibleRect(visible);
-        ViewGroup.LayoutParams lp = button.getLayoutParams();
-        String lpText = lp == null ? "null" : (lp.width + "x" + lp.height);
-        ViewParent parent = button.getParent();
-        XposedLog.i("熟知：350ms 后 " + describe(button)
-                + " lp=" + lpText
-                + " screen=(" + loc[0] + "," + loc[1] + ")"
-                + " 可见区=" + (onScreen ? visible.toShortString() : "无")
-                + " clickable=" + button.isClickable()
-                + " enabled=" + button.isEnabled()
-                + " 父=" + (parent instanceof View ? describe((View) parent) : "null"));
-        if (button.getWidth() == 0 || button.getHeight() == 0 || !onScreen) {
-            dumpToolbarPrefs(button.getContext());
-        }
-    }
-
-    /**
-     * 尺寸为 0 时把墨墨偏好里和工具栏 / 熟知相关的键打出来。
-     *
-     * <p>这些键里应该有一个就是「标识熟知」总开关；找到后就能直接改墨墨自己的设置，
-     * 让它按正常布局把按钮排进去，而不是由模块硬把 GONE 翻成 VISIBLE。
-     */
-    private static void dumpToolbarPrefs(Context context) {
-        if (familiarPrefsDumped) return;
-        familiarPrefsDumped = true;
+    private static void startFamiliarGesture(final Activity activity, final View button) {
+        final View decor;
         try {
-            File dir = new File(context.getApplicationInfo().dataDir, "shared_prefs");
-            File[] files = dir.listFiles();
-            if (files == null) {
-                XposedLog.w("熟知：偏好目录读不到 " + dir);
-                return;
-            }
-            StringBuilder out = new StringBuilder();
-            int hits = 0;
-            for (File file : files) {
-                String name = file.getName();
-                if (!name.endsWith(".xml")) continue;
-                String prefs = name.substring(0, name.length() - 4);
-                try {
-                    SharedPreferences sp = context.getSharedPreferences(prefs, Context.MODE_PRIVATE);
-                    for (Map.Entry<String, ?> entry : sp.getAll().entrySet()) {
-                        String key = entry.getKey();
-                        String lower = key.toLowerCase(Locale.ROOT);
-                        if (lower.contains("familiar") || lower.contains("well")
-                                || lower.contains("toolbar") || lower.contains("action")) {
-                            if (hits++ < 40) {
-                                out.append('\n').append(prefs).append('/')
-                                        .append(key).append('=').append(entry.getValue());
-                            }
-                        }
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-            XposedLog.i("熟知：偏好里相关的键共 " + hits + " 条" + out);
+            decor = activity.getWindow().getDecorView();
         } catch (Throwable t) {
-            XposedLog.w("熟知：读偏好失败 " + t);
+            return;
+        }
+        if (decor == null) return;
+
+        int[] buttonPos = new int[2];
+        int[] decorPos = new int[2];
+        button.getLocationOnScreen(buttonPos);
+        decor.getLocationOnScreen(decorPos);
+        final float startX = buttonPos[0] - decorPos[0] + button.getWidth() / 2f;
+        final float startY = buttonPos[1] - decorPos[1] + button.getHeight() / 2f;
+
+        // 浮层贴在「认识」上方，滑过按钮上沿再往上 120dp 足够触发；
+        // 只滑一点点墨墨会当成「松手取消」。
+        float density = activity.getResources().getDisplayMetrics().density;
+        float distance = Math.max(120f * density, button.getHeight() * 1.2f);
+        final float endY = Math.max(decor.getHeight() * 0.2f, startY - distance);
+
+        final long downTime = SystemClock.uptimeMillis();
+        final Handler handler = new Handler(Looper.getMainLooper());
+        familiarGestureRunning = true;
+
+        sendTouch(decor, downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY);
+        XposedLog.i("熟知：长按底栏「认识」 " + describe(button)
+                + "，随后上划 " + (int) (startY - endY) + "px");
+
+        // 500ms 才算长按，留 140ms 余量等墨墨把提示浮层画出来
+        handler.postDelayed(() -> {
+            final int steps = 10;
+            for (int i = 1; i <= steps; i++) {
+                final int step = i;
+                handler.postDelayed(() -> {
+                    float y = startY + (endY - startY) * step / steps;
+                    sendTouch(decor, downTime, SystemClock.uptimeMillis(),
+                            MotionEvent.ACTION_MOVE, startX, y);
+                }, step * 26L);
+            }
+            handler.postDelayed(() -> {
+                sendTouch(decor, downTime, SystemClock.uptimeMillis(),
+                        MotionEvent.ACTION_UP, startX, endY);
+                familiarGestureRunning = false;
+                XposedLog.i("熟知：已上划到「标记熟知」并松手");
+            }, steps * 26L + 80L);
+        }, 640L);
+    }
+
+    private static void sendTouch(View target, long downTime, long eventTime,
+                                  int action, float x, float y) {
+        MotionEvent event = MotionEvent.obtain(downTime, eventTime, action, x, y, 0);
+        try {
+            target.dispatchTouchEvent(event);
+        } catch (Throwable t) {
+            XposedLog.w("熟知：手势发送失败 " + t);
+        } finally {
+            event.recycle();
         }
     }
 
@@ -302,46 +208,6 @@ public final class ActionExecutor {
             cur = parent instanceof View ? (View) parent : null;
         }
         return builder.toString();
-    }
-
-    /** 操作栏里找「熟知」按钮：优先 id，其次 contentDescription，最后文案。 */
-    private static View findFamiliarInBar(View bar) {
-        ArrayList<View> views = new ArrayList<>();
-        collectViews(bar, views);
-        for (View view : views) {
-            if (idName(view).contains("well_familiar")) return view;
-        }
-        for (View view : views) {
-            CharSequence desc = view.getContentDescription();
-            if (desc != null && normalize(desc).contains("熟知")) return view;
-        }
-        for (View view : views) {
-            if (view instanceof TextView
-                    && "熟知".equals(normalize(((TextView) view).getText()))) {
-                return view;
-            }
-        }
-        return null;
-    }
-
-    /** 找不到按钮时把操作栏整棵子树打进日志，用来判断这个版本到底有没有这个控件。 */
-    private static void dumpBar(View bar) {
-        ArrayList<View> views = new ArrayList<>();
-        collectViews(bar, views);
-        StringBuilder builder = new StringBuilder("操作栏子树：");
-        int count = 0;
-        for (View view : views) {
-            if (count++ >= 40) {
-                builder.append(" …");
-                break;
-            }
-            builder.append("\n  ").append(describe(view));
-            if (view instanceof TextView) {
-                String text = normalize(((TextView) view).getText());
-                if (text.length() > 0) builder.append(" \"").append(text).append('"');
-            }
-        }
-        XposedLog.w(builder.toString());
     }
 
     private static String idName(View view) {
