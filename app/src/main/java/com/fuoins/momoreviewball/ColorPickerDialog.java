@@ -46,29 +46,33 @@ final class ColorPickerDialog {
         final float[] hsv = new float[3];
         Color.colorToHSV(current | 0xFF000000, hsv);
 
-        LinearLayout root = new LinearLayout(activity);
-        root.setOrientation(LinearLayout.VERTICAL);
         int padH = Util.dp(activity, 20);
-        root.setPadding(padH, Util.dp(activity, 6), padH, Util.dp(activity, 2));
+
+        // 取色区自己一块，底部按钮单独一行。不用 AlertDialog 自带的按钮：
+        // 墨墨的页面主题会把系统按钮的文字/背景配色覆盖掉，实测点开只剩一片白，
+        // 看不到「确定」。这里全部自己画，颜色写死，任何主题下都能看见。
+        LinearLayout content = new LinearLayout(activity);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(padH, Util.dp(activity, 6), padH, Util.dp(activity, 2));
 
         TextView title = new TextView(activity);
         title.setText("「" + Config.labelOf(actionKey) + "」的颜色");
         title.setTextColor(0xFF1F2430);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         title.getPaint().setFakeBoldText(true);
-        root.addView(title);
+        content.addView(title);
 
         final SvPanel sv = new SvPanel(activity);
         LinearLayout.LayoutParams svLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Util.dp(activity, 188));
         svLp.topMargin = Util.dp(activity, 12);
-        root.addView(sv, svLp);
+        content.addView(sv, svLp);
 
         final HueBar hueBar = new HueBar(activity);
         LinearLayout.LayoutParams hueLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Util.dp(activity, 24));
         hueLp.topMargin = Util.dp(activity, 12);
-        root.addView(hueBar, hueLp);
+        content.addView(hueBar, hueLp);
 
         LinearLayout hexRow = new LinearLayout(activity);
         hexRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -76,7 +80,7 @@ final class ColorPickerDialog {
         LinearLayout.LayoutParams hexRowLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         hexRowLp.topMargin = Util.dp(activity, 14);
-        root.addView(hexRow, hexRowLp);
+        content.addView(hexRow, hexRowLp);
 
         final View preview = new View(activity);
         preview.setLayoutParams(new LinearLayout.LayoutParams(
@@ -102,7 +106,7 @@ final class ColorPickerDialog {
         tip.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
         tip.setTextColor(0xFF8A8F9C);
         tip.setPadding(0, Util.dp(activity, 8), 0, 0);
-        root.addView(tip);
+        content.addView(tip);
 
         final boolean[] updating = {false};
 
@@ -172,18 +176,61 @@ final class ColorPickerDialog {
 
         syncAll.run();
 
+        LinearLayout actions = new LinearLayout(activity);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.CENTER_VERTICAL);
+        actions.setPadding(padH, Util.dp(activity, 8), padH, Util.dp(activity, 10));
+
+        TextView resetDefault = new TextView(activity);
+        resetDefault.setText("恢复默认");
+        resetDefault.setTextColor(0xFF2F3E6E);
+        resetDefault.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        resetDefault.setPadding(0, Util.dp(activity, 10), 0, Util.dp(activity, 10));
+        resetDefault.setLayoutParams(new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        actions.addView(resetDefault);
+
+        TextView cancel = new TextView(activity);
+        cancel.setText("取消");
+        cancel.setTextColor(0xFF8A8F9C);
+        cancel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        cancel.setPadding(Util.dp(activity, 14), Util.dp(activity, 10),
+                Util.dp(activity, 14), Util.dp(activity, 10));
+        actions.addView(cancel);
+
+        TextView confirm = new TextView(activity);
+        confirm.setText("确定");
+        confirm.setTextColor(0xFFFFFFFF);
+        confirm.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        confirm.getPaint().setFakeBoldText(true);
+        GradientDrawable okBg = new GradientDrawable();
+        okBg.setColor(0xFF2F3E6E);
+        okBg.setCornerRadius(Util.dp(activity, 18));
+        confirm.setBackground(okBg);
+        confirm.setPadding(Util.dp(activity, 22), Util.dp(activity, 9),
+                Util.dp(activity, 22), Util.dp(activity, 9));
+        LinearLayout.LayoutParams okLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        okLp.leftMargin = Util.dp(activity, 6);
+        actions.addView(confirm, okLp);
+
+        LinearLayout root = new LinearLayout(activity);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.addView(content);
+        root.addView(actions);
+
         AlertDialog dialog = new AlertDialog.Builder(
                 activity, android.R.style.Theme_Material_Light_Dialog_Alert)
                 .setView(root)
-                .setPositiveButton("确定", (d, which) -> {
-                    if (callback != null) callback.onPicked(Color.HSVToColor(hsv) | 0xFF000000);
-                })
-                .setNegativeButton("取消", null)
-                .setNeutralButton("恢复默认", null)
                 .create();
-        dialog.show();
+
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        confirm.setOnClickListener(v -> {
+            if (callback != null) callback.onPicked(Color.HSVToColor(hsv) | 0xFF000000);
+            dialog.dismiss();
+        });
         // 「恢复默认」只把取色器拨回默认色，仍要点确定才生效，避免误触
-        dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+        resetDefault.setOnClickListener(v -> {
             float[] def = new float[3];
             Color.colorToHSV(Config.defaultColorOf(actionKey), def);
             hsv[0] = def[0];
@@ -191,6 +238,17 @@ final class ColorPickerDialog {
             hsv[2] = def[2];
             syncAll.run();
         });
+
+        dialog.setCanceledOnTouchOutside(true);
+        dialog.show();
+        // 默认的 Dialog 宽度偏窄，颜色图会被压成一条；给到屏幕的 92%
+        try {
+            if (dialog.getWindow() != null) {
+                int width = (int) (activity.getResources().getDisplayMetrics().widthPixels * 0.92f);
+                dialog.getWindow().setLayout(width, ViewGroup.LayoutParams.WRAP_CONTENT);
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     /** 饱和度 / 明度颜色图。 */
