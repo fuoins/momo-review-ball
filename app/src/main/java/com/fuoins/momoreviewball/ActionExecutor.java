@@ -2,6 +2,8 @@ package com.fuoins.momoreviewball;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.SharedPreferences;
+import android.graphics.Rect;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
@@ -13,8 +15,10 @@ import android.view.ViewParent;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 动作执行器。
@@ -77,6 +81,9 @@ public final class ActionExecutor {
     private static boolean familiarLoggedMissing;
     private static boolean familiarStillHidden;
     private static boolean familiarChainLogged;
+    private static boolean familiarLayoutLogged;
+    private static boolean familiarPrefsDumped;
+    private static boolean familiarAlphaLogged;
     /** 操作栏与「熟知」按钮的缓存：答案显示期间要反复复查，不能每次都遍历视图树。 */
     private static java.lang.ref.WeakReference<View> familiarBarRef;
     private static java.lang.ref.WeakReference<View> familiarButtonRef;
@@ -114,7 +121,13 @@ public final class ActionExecutor {
             }
             familiarButtonRef = new java.lang.ref.WeakReference<>(button);
         }
-        if (button.isShown()) return true;
+        // isShown() 只说明「自己和祖先都是 VISIBLE」，不代表屏幕上真有东西：
+        // 墨墨藏这个按钮时用的是 alpha 动画，播完 alpha 可能是 0，
+        // 刚设回 VISIBLE 的那一帧宽高也还是 0。三个条件都满足才算真的露出来。
+        if (button.isShown() && button.getAlpha() > 0.99f
+                && button.getWidth() > 0 && button.getHeight() > 0) {
+            return true;
+        }
         return revealFamiliar(button, bar);
     }
 
@@ -150,12 +163,31 @@ public final class ActionExecutor {
             ViewParent parent = cur.getParent();
             cur = parent instanceof View ? (View) parent : null;
         }
+        // 墨墨隐藏工具栏图标用的是 alpha 动画；只改 visibility 会留下一个
+        // 「isShown()=true 但 alpha=0」的幽灵按钮，屏幕上什么都看不到。
+        boolean alphaFixed = false;
+        if (button.getAlpha() < 0.99f) {
+            button.animate().cancel();
+            button.setAlpha(1f);
+            alphaFixed = true;
+        }
         if (changed) {
             XposedLog.i("熟知：已翻开 " + chain + "按钮 " + describe(button));
-        } else if (!familiarChainLogged) {
-            // 整条链都写着 VISIBLE 却 isShown()=false：多半是尺寸为 0 或不在窗口里
+        } else if (alphaFixed && !familiarAlphaLogged) {
+            familiarAlphaLogged = true;
+            XposedLog.i("熟知：按钮被 alpha 动画藏住了，已恢复到 1.0；" + describe(button));
+        } else if (!changed && !alphaFixed && !familiarChainLogged) {
+            // 整条链都可见、alpha 也正常却仍没尺寸：多半是被布局挤成了 0
             familiarChainLogged = true;
             XposedLog.w("熟知：按钮链都可见但仍不可见 " + chain + "按钮 " + describe(button));
+        }
+
+        // 刚设回 VISIBLE 的这一帧还没 measure，宽高必然是 0；350ms 后把最终
+        // 布局参数和屏幕位置打出来，用来判断是「没排上」还是「排到屏幕外」。
+        if (!familiarLayoutLogged) {
+            final java.lang.ref.WeakReference<View> layoutRef =
+                    new java.lang.ref.WeakReference<>(button);
+            button.postDelayed(() -> logFamiliarLayout(layoutRef.get()), 350L);
         }
 
         // 墨墨可能在下一帧按自己的数据再藏一次，300ms 后复查一次。
@@ -169,6 +201,73 @@ public final class ActionExecutor {
             }
         }, 300L);
         return button.isShown();
+    }
+
+    /** 350ms 后按钮的最终状态：宽高、布局参数、屏幕坐标、可见区。 */
+    private static void logFamiliarLayout(View button) {
+        if (button == null || !button.isAttachedToWindow() || familiarLayoutLogged) return;
+        familiarLayoutLogged = true;
+        int[] loc = new int[2];
+        button.getLocationOnScreen(loc);
+        Rect visible = new Rect();
+        boolean onScreen = button.getGlobalVisibleRect(visible);
+        ViewGroup.LayoutParams lp = button.getLayoutParams();
+        String lpText = lp == null ? "null" : (lp.width + "x" + lp.height);
+        ViewParent parent = button.getParent();
+        XposedLog.i("熟知：350ms 后 " + describe(button)
+                + " lp=" + lpText
+                + " screen=(" + loc[0] + "," + loc[1] + ")"
+                + " 可见区=" + (onScreen ? visible.toShortString() : "无")
+                + " clickable=" + button.isClickable()
+                + " enabled=" + button.isEnabled()
+                + " 父=" + (parent instanceof View ? describe((View) parent) : "null"));
+        if (button.getWidth() == 0 || button.getHeight() == 0 || !onScreen) {
+            dumpToolbarPrefs(button.getContext());
+        }
+    }
+
+    /**
+     * 尺寸为 0 时把墨墨偏好里和工具栏 / 熟知相关的键打出来。
+     *
+     * <p>这些键里应该有一个就是「标识熟知」总开关；找到后就能直接改墨墨自己的设置，
+     * 让它按正常布局把按钮排进去，而不是由模块硬把 GONE 翻成 VISIBLE。
+     */
+    private static void dumpToolbarPrefs(Context context) {
+        if (familiarPrefsDumped) return;
+        familiarPrefsDumped = true;
+        try {
+            File dir = new File(context.getApplicationInfo().dataDir, "shared_prefs");
+            File[] files = dir.listFiles();
+            if (files == null) {
+                XposedLog.w("熟知：偏好目录读不到 " + dir);
+                return;
+            }
+            StringBuilder out = new StringBuilder();
+            int hits = 0;
+            for (File file : files) {
+                String name = file.getName();
+                if (!name.endsWith(".xml")) continue;
+                String prefs = name.substring(0, name.length() - 4);
+                try {
+                    SharedPreferences sp = context.getSharedPreferences(prefs, Context.MODE_PRIVATE);
+                    for (Map.Entry<String, ?> entry : sp.getAll().entrySet()) {
+                        String key = entry.getKey();
+                        String lower = key.toLowerCase(Locale.ROOT);
+                        if (lower.contains("familiar") || lower.contains("well")
+                                || lower.contains("toolbar") || lower.contains("action")) {
+                            if (hits++ < 40) {
+                                out.append('\n').append(prefs).append('/')
+                                        .append(key).append('=').append(entry.getValue());
+                            }
+                        }
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            XposedLog.i("熟知：偏好里相关的键共 " + hits + " 条" + out);
+        } catch (Throwable t) {
+            XposedLog.w("熟知：读偏好失败 " + t);
+        }
     }
 
     private static String visibilityName(int visibility) {
