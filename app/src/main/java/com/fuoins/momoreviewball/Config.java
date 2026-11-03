@@ -75,6 +75,13 @@ public final class Config {
     public boolean locked = false;
     /** 悬浮球缩放，1.0 为原生大小；由设置页滑杆调节，直接作用在球控件上。 */
     public float scale = 1f;
+    /**
+     * 映射里用到「熟知」时，自动把复习页底部的「熟知」按钮显示出来。
+     *
+     * <p>墨墨默认关闭「标识熟知」，按钮通常还在视图树里，只是被设为 GONE；
+     * 模块可以直接把它露出来，省得用户再跑一趟「更多设置 → 复习页面 → 工具栏快捷」。
+     */
+    public boolean autoFamiliar = true;
     public String[] before = DEFAULT_BEFORE.clone();
     public String[] after = DEFAULT_AFTER.clone();
     /** 用户改过的动作颜色：key 为动作，value 为 ARGB；没改过的走 {@link #defaultColorOf}。 */
@@ -128,6 +135,7 @@ public final class Config {
         enabled = true;
         locked = false;
         scale = 1f;
+        autoFamiliar = true;
         before = DEFAULT_BEFORE.clone();
         after = DEFAULT_AFTER.clone();
         colors.clear();
@@ -183,6 +191,19 @@ public final class Config {
         colors.clear();
     }
 
+    /** 当前映射里是否用到「熟知」。 */
+    public boolean usesFamiliar() {
+        return contains(before, ACTION_FAMILIAR) || contains(after, ACTION_FAMILIAR);
+    }
+
+    private static boolean contains(String[] actions, String key) {
+        if (actions == null) return false;
+        for (String action : actions) {
+            if (key.equals(action)) return true;
+        }
+        return false;
+    }
+
     public String actionFor(boolean answerShown, int gestureIndex) {
         String[] array = answerShown ? after : before;
         if (array == null || gestureIndex < 0 || gestureIndex >= array.length) {
@@ -223,6 +244,7 @@ public final class Config {
             o.put("enabled", enabled);
             o.put("locked", locked);
             o.put("scale", (double) scale);
+            o.put("autoFamiliar", autoFamiliar);
             o.put("schema", SCHEMA);
             o.put("before", new JSONArray(Arrays.asList(before)));
             o.put("after", new JSONArray(Arrays.asList(after)));
@@ -245,6 +267,7 @@ public final class Config {
             JSONObject o = new JSONObject(json);
             c.enabled = o.optBoolean("enabled", c.enabled);
             c.locked = o.optBoolean("locked", c.locked);
+            c.autoFamiliar = o.optBoolean("autoFamiliar", true);
             c.scale = clamp((float) o.optDouble("scale", 1.0), SCALE_MIN, SCALE_MAX);
             c.before = readArray(o.optJSONArray("before"), DEFAULT_BEFORE, false);
             c.after = readArray(o.optJSONArray("after"), DEFAULT_AFTER, true);

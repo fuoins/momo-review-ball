@@ -1,5 +1,6 @@
 package com.fuoins.momoreviewball;
 
+import android.app.Activity;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.ColorFilter;
@@ -51,6 +52,8 @@ final class BallOverlay extends Drawable {
     private int seenRevision = -1;
     private int barId;
     private WeakReference<View> barRef;
+    /** 答案出现后尝试把「熟知」按钮露出来的次数，试几次就放弃，避免一直遍历视图树。 */
+    private int familiarAttempts;
 
     private final Runnable clearHighlight = () -> {
         highlight = 0;
@@ -134,6 +137,21 @@ final class BallOverlay extends Drawable {
         if (now != after || changed) {
             after = now;
             refresh();
+        }
+
+        if (!now) {
+            familiarAttempts = 0;
+            return;
+        }
+        // 评分栏出现后，把墨墨藏起来的「熟知」按钮露出来。
+        // 按钮可能比评分栏晚一两帧才挂上，失败几次再放弃。
+        if (familiarAttempts < 5) {
+            Activity activity = Util.findActivity(host.getContext());
+            if (activity != null && ActionExecutor.ensureFamiliarVisible(activity)) {
+                familiarAttempts = 5;
+            } else {
+                familiarAttempts++;
+            }
         }
     }
 

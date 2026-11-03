@@ -71,11 +71,19 @@ public final class SettingsPanel {
 
         // 「熟知」不是默认就有的按钮，墨墨要在别处打开才会出现，这里给一条常驻提示，
         // 只在真的用到了「熟知」时显示。
-        final TextView familiarNotice = notice(activity,
-                "用到了「熟知」：请到 更多设置 → 复习页面 → 工具栏快捷，打开「标识熟知」，"
-                        + "否则球上点不出「熟知」。");
-        final Runnable syncFamiliar = () -> familiarNotice.setVisibility(
-                usesFamiliar(config) ? View.VISIBLE : View.GONE);
+        final TextView familiarNotice = notice(activity, "");
+        final Runnable syncFamiliar = () -> {
+            if (!config.usesFamiliar()) {
+                familiarNotice.setVisibility(View.GONE);
+                return;
+            }
+            familiarNotice.setVisibility(View.VISIBLE);
+            familiarNotice.setText(config.autoFamiliar
+                    ? "用到了「熟知」：已尝试把复习页底部的「熟知」按钮显示出来；"
+                        + "若你的墨墨版本没有这个控件，仍需到 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」。"
+                    : "用到了「熟知」：自动显示已关闭，请到 更多设置 → 复习页面 → 工具栏快捷 "
+                        + "打开「标识熟知」，否则球上点不出「熟知」。");
+        };
 
         final TextView peekNotice = notice(activity,
                 "「瞄一眼」走墨墨官方的按住预览：手指滑到位、还没松手时就把例句顶出来，"
@@ -111,6 +119,11 @@ public final class SettingsPanel {
         card.addView(switchRow(activity, "启用模块手势", config.enabled, checked -> {
             config.enabled = checked;
             config.save(activity);
+        }));
+        card.addView(switchRow(activity, "自动显示「熟知」按钮", config.autoFamiliar, checked -> {
+            config.autoFamiliar = checked;
+            config.save(activity);
+            syncNotice.run();
         }));
 
         card.addView(colorSection(activity, config, reloaders));
@@ -571,8 +584,7 @@ public final class SettingsPanel {
     }
 
     private static boolean usesFamiliar(Config config) {
-        return containsAction(config.before, Config.ACTION_FAMILIAR)
-                || containsAction(config.after, Config.ACTION_FAMILIAR);
+        return config.usesFamiliar();
     }
 
     private static boolean containsAction(String[] actions, String key) {

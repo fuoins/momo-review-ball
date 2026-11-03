@@ -46,6 +46,8 @@ public final class ActionExecutor {
                         || clickText(activity, new String[]{"忘记"}, true);
                 break;
             case Config.ACTION_FAMILIAR:
+                // 先确保按钮可见，再点；否则 GONE 的按钮会被 clickId 的 isShown 过滤掉
+                ensureFamiliarVisible(activity);
                 ok = clickId(activity, "iv_well_familiar")
                         || clickByDescription(activity, new String[]{"熟知"})
                         || clickText(activity, new String[]{"熟知", "熟悉"}, true);
@@ -70,6 +72,73 @@ public final class ActionExecutor {
             Log.w(TAG, "action not found: " + action + ", visible texts: " + dumpTexts(activity));
         }
         return ok;
+    }
+
+    private static boolean familiarLoggedMissing;
+
+    /**
+     * 让复习页底部的「熟知」按钮显示出来。
+     *
+     * <p>墨墨默认关闭「标识熟知」时，按钮通常并没有被移除，只是 visibility 为 GONE。
+     * 这里把它（必要时连直接父容器）设为 VISIBLE，原生绑定的点击逻辑仍然有效，
+     * 球上的「熟知」就能直接点出来，不用再跑一趟更多设置。
+     *
+     * <p>只对仍然存在的控件有效；如果当前版本压根没有这个控件，返回 false，
+     * 由调用方回退到「更多设置 → 复习页面 → 工具栏快捷」的提示。
+     */
+    public static boolean ensureFamiliarVisible(Activity activity) {
+        if (activity == null) return false;
+        Config config = Config.get(activity);
+        if (!config.autoFamiliar || !config.usesFamiliar()) return false;
+
+        View button = findByIdName(activity, "iv_well_familiar");
+        if (button == null) {
+            button = findTextInOperationBar(activity, "熟知");
+        }
+        if (button == null) {
+            if (!familiarLoggedMissing) {
+                familiarLoggedMissing = true;
+                XposedLog.w("熟知：视图树里没有 iv_well_familiar，需要去更多设置打开「标识熟知」");
+            }
+            return false;
+        }
+        if (button.isShown()) return true;   // 已经露出来了，什么都不用做
+
+        if (button.getVisibility() != View.VISIBLE) {
+            button.setVisibility(View.VISIBLE);
+            XposedLog.i("熟知：已把底部「熟知」按钮设为可见");
+        }
+        // 按钮自身可见还不够：有些版本把它整个包在 GONE 的容器里。
+        // 只动直接父容器，再往上可能把整页容器翻出来，不能乱改。
+        ViewParent parent = button.getParent();
+        if (parent instanceof View) {
+            View container = (View) parent;
+            if (container.getVisibility() != View.VISIBLE
+                    && !"rev_cl_operation_bar".equals(idName(container))) {
+                container.setVisibility(View.VISIBLE);
+                XposedLog.i("熟知：已把按钮所在容器设为可见");
+            }
+        }
+        return button.isShown();
+    }
+
+    private static View findTextInOperationBar(Activity activity, String label) {
+        View bar = findByIdName(activity, "rev_cl_operation_bar");
+        View root = bar != null ? bar : activity.getWindow().getDecorView();
+        ArrayList<TextView> views = new ArrayList<>();
+        collectTextViews(root, views);
+        for (TextView view : views) {
+            if (normalize(view.getText()).equals(label)) return view;
+        }
+        return null;
+    }
+
+    private static String idName(View view) {
+        try {
+            return view.getResources().getResourceEntryName(view.getId());
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /** 当前是否已经显示答案：复习页出现「认识/忘记」评分按钮即视为已显示。 */

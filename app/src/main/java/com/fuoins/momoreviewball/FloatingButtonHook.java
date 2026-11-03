@@ -828,6 +828,12 @@ public final class FloatingButtonHook {
                     downY = event.getRawY();
                     lastRawX = downX;
                     lastRawY = downY;
+                    // 答案出现后第一次摸球时，顺手把墨墨藏起来的「熟知」按钮露出来。
+                    // 正常路径是 BallOverlay 的轮询，这里只是兜底，按钮已可见时几乎零开销。
+                    if (config.autoFamiliar && config.usesFamiliar()) {
+                        Activity activity = Util.findActivity(v.getContext());
+                        if (activity != null) ActionExecutor.ensureFamiliarVisible(activity);
+                    }
                     // 复习页的父容器（卡片 / ViewPager）会在 MOVE 阶段抢事件，
                     // 一抢球就收到 CANCEL，表现就是「滑动时好时坏、大多没反应」。
                     // 按下期间先把这个权利拿过来，抬手再还回去。
@@ -1359,9 +1365,9 @@ public final class FloatingButtonHook {
 
             if (!ok) {
                 if (Config.ACTION_FAMILIAR.equals(action)) {
-                    // 「熟知」不是默认按钮，点不到时直接把开关路径告诉用户
+                    // 自动显示没成功时，仍然把墨墨自己的开关路径告诉用户
                     ActionExecutor.toast(activity,
-                            "「熟知」需要先在 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
+                            "「熟知」按钮没有出现：请到 更多设置 → 复习页面 → 工具栏快捷 打开「标识熟知」");
                 } else if (Config.ACTION_PEEK.equals(action)) {
                     // 瞄一眼走的是官方按钮 / 原生球手势，三路都没走通才提示
                     ActionExecutor.toast(activity,
