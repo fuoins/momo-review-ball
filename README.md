@@ -170,7 +170,7 @@ adb logcat -s MoMoBall
 
 ## 构建
 
-GitHub Actions 自动构建：推送到 `main` 或手动运行 `build` workflow，产物在 Actions 的 Artifacts 中；打 `v*` 标签自动发布 Release。
+GitHub Actions 自动构建：推送到 `main` 或手动运行 `build` workflow，产物在 Actions 的 Artifacts 中；打 `v*` 标签自动发布 Release，并在发布前清理更早的 Release，仓库始终只留最新一版。
 
 本地构建（JDK 17 + Android SDK 34）：
 
