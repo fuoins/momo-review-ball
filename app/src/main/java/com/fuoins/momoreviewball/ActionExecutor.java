@@ -75,64 +75,174 @@ public final class ActionExecutor {
     }
 
     private static boolean familiarLoggedMissing;
+    private static boolean familiarStillHidden;
+    private static boolean familiarChainLogged;
+    /** 操作栏与「熟知」按钮的缓存：答案显示期间要反复复查，不能每次都遍历视图树。 */
+    private static java.lang.ref.WeakReference<View> familiarBarRef;
+    private static java.lang.ref.WeakReference<View> familiarButtonRef;
 
     /**
      * 让复习页底部的「熟知」按钮显示出来。
      *
-     * <p>墨墨默认关闭「标识熟知」时，按钮通常并没有被移除，只是 visibility 为 GONE。
-     * 这里把它（必要时连直接父容器）设为 VISIBLE，原生绑定的点击逻辑仍然有效，
-     * 球上的「熟知」就能直接点出来，不用再跑一趟更多设置。
+     * <p>墨墨关闭「标识熟知」时，按钮通常没有被移除，只是 visibility 为 GONE；
+     * 更麻烦的是它每次翻页、刷新都会按自己的设置再藏一次，所以这里不能只做一次，
+     * 而是由 {@link BallOverlay} 在答案显示期间反复调用，藏一次就翻回来。
      *
-     * <p>只对仍然存在的控件有效；如果当前版本压根没有这个控件，返回 false，
-     * 由调用方回退到「更多设置 → 复习页面 → 工具栏快捷」的提示。
+     * <p>只在复习页（存在 {@code rev_cl_operation_bar}）并且答案已经出现时动手。
+     * 设置页、单词列表页里也有「熟知」两个字，照着文字找会翻错控件。
      */
     public static boolean ensureFamiliarVisible(Activity activity) {
         if (activity == null) return false;
         Config config = Config.get(activity);
         if (!config.autoFamiliar || !config.usesFamiliar()) return false;
-        // 答案还没出来时评分栏是整体隐藏的，这时候把按钮翻出来会破坏页面状态
-        if (!isAnswerShown(activity)) return false;
 
-        View button = findByIdName(activity, "iv_well_familiar");
-        if (button == null) {
-            button = findTextInOperationBar(activity, "熟知");
-        }
-        if (button == null) {
-            if (!familiarLoggedMissing) {
-                familiarLoggedMissing = true;
-                XposedLog.w("熟知：视图树里没有 iv_well_familiar，需要去更多设置打开「标识熟知」");
-            }
-            return false;
-        }
-        if (button.isShown()) return true;   // 已经露出来了，什么都不用做
+        View bar = resolveOperationBar(activity);
+        // 没有操作栏就不是复习页；操作栏不可见说明答案还没出来
+        if (bar == null || !bar.isShown()) return false;
 
-        if (button.getVisibility() != View.VISIBLE) {
-            button.setVisibility(View.VISIBLE);
-            XposedLog.i("熟知：已把底部「熟知」按钮设为可见");
-        }
-        // 按钮自身可见还不够：有些版本把它整个包在 GONE 的容器里。
-        // 只动直接父容器，再往上可能把整页容器翻出来，不能乱改。
-        ViewParent parent = button.getParent();
-        if (parent instanceof View) {
-            View container = (View) parent;
-            if (container.getVisibility() != View.VISIBLE
-                    && !"rev_cl_operation_bar".equals(idName(container))) {
-                container.setVisibility(View.VISIBLE);
-                XposedLog.i("熟知：已把按钮所在容器设为可见");
+        View button = familiarButtonRef == null ? null : familiarButtonRef.get();
+        if (button == null || !button.isAttachedToWindow()) {
+            button = findByIdName(activity, "iv_well_familiar");
+            if (button == null) button = findFamiliarInBar(bar);
+            if (button == null) {
+                if (!familiarLoggedMissing) {
+                    familiarLoggedMissing = true;
+                    XposedLog.w("熟知：操作栏里找不到「熟知」按钮，需要去更多设置打开「标识熟知」");
+                    dumpBar(bar);
+                }
+                return false;
             }
+            familiarButtonRef = new java.lang.ref.WeakReference<>(button);
         }
+        if (button.isShown()) return true;
+        return revealFamiliar(button, bar);
+    }
+
+    /** 复习页的操作栏；页面重建后引用失效，会重新查一次。 */
+    private static View resolveOperationBar(Activity activity) {
+        View decor = activity.getWindow() == null ? null : activity.getWindow().getDecorView();
+        View bar = familiarBarRef == null ? null : familiarBarRef.get();
+        // 缓存必须属于当前页面：从复习页切到设置页时，旧页面的操作栏可能还挂着，
+        // 但它不是用户正在看的那个，不能拿来判断
+        if (bar != null && bar.isAttachedToWindow() && bar.getRootView() == decor) return bar;
+        bar = findByIdName(activity, "rev_cl_operation_bar");
+        if (bar != null) familiarBarRef = new java.lang.ref.WeakReference<>(bar);
+        return bar;
+    }
+
+    /**
+     * 把「熟知」按钮和它上面每一层被藏起来的容器都翻出来。
+     *
+     * <p>只翻到操作栏为止，不碰操作栏本身。之前只处理直接父容器，遇到
+     * 「按钮 VISIBLE、再上一层 GONE」的布局就会出现「日志说设成可见了、屏幕上却没有」。
+     */
+    private static boolean revealFamiliar(View button, View bar) {
+        StringBuilder chain = new StringBuilder();
+        View cur = button;
+        int guard = 0;
+        boolean changed = false;
+        while (cur != null && cur != bar && guard++ < 12) {
+            chain.append(idName(cur)).append('=').append(visibilityName(cur.getVisibility())).append(" < ");
+            if (cur.getVisibility() != View.VISIBLE) {
+                cur.setVisibility(View.VISIBLE);
+                changed = true;
+            }
+            ViewParent parent = cur.getParent();
+            cur = parent instanceof View ? (View) parent : null;
+        }
+        if (changed) {
+            XposedLog.i("熟知：已翻开 " + chain + "按钮 " + describe(button));
+        } else if (!familiarChainLogged) {
+            // 整条链都写着 VISIBLE 却 isShown()=false：多半是尺寸为 0 或不在窗口里
+            familiarChainLogged = true;
+            XposedLog.w("熟知：按钮链都可见但仍不可见 " + chain + "按钮 " + describe(button));
+        }
+
+        // 墨墨可能在下一帧按自己的数据再藏一次，300ms 后复查一次。
+        // 真的还不可见就只记一条日志（BallOverlay 会继续每 400ms 翻一次，不要在这里递归刷屏）。
+        final java.lang.ref.WeakReference<View> ref = new java.lang.ref.WeakReference<>(button);
+        button.postDelayed(() -> {
+            View b = ref.get();
+            if (b != null && b.isAttachedToWindow() && !b.isShown() && !familiarStillHidden) {
+                familiarStillHidden = true;
+                XposedLog.w("熟知：翻开后仍不可见，父链 " + parentChain(b));
+            }
+        }, 300L);
         return button.isShown();
     }
 
-    private static View findTextInOperationBar(Activity activity, String label) {
-        View bar = findByIdName(activity, "rev_cl_operation_bar");
-        View root = bar != null ? bar : activity.getWindow().getDecorView();
-        ArrayList<TextView> views = new ArrayList<>();
-        collectTextViews(root, views);
-        for (TextView view : views) {
-            if (normalize(view.getText()).equals(label)) return view;
+    private static String visibilityName(int visibility) {
+        switch (visibility) {
+            case View.VISIBLE:
+                return "V";
+            case View.INVISIBLE:
+                return "I";
+            case View.GONE:
+                return "G";
+            default:
+                return String.valueOf(visibility);
+        }
+    }
+
+    private static String describe(View view) {
+        return view.getClass().getSimpleName() + "#" + idName(view)
+                + " " + view.getWidth() + "x" + view.getHeight()
+                + " @(" + view.getLeft() + "," + view.getTop() + ")"
+                + " alpha=" + view.getAlpha()
+                + " " + visibilityName(view.getVisibility());
+    }
+
+    private static String parentChain(View view) {
+        StringBuilder builder = new StringBuilder();
+        View cur = view;
+        int guard = 0;
+        while (cur != null && guard++ < 10) {
+            builder.append(cur.getClass().getSimpleName()).append('#').append(idName(cur))
+                    .append('=').append(visibilityName(cur.getVisibility())).append(" < ");
+            ViewParent parent = cur.getParent();
+            cur = parent instanceof View ? (View) parent : null;
+        }
+        return builder.toString();
+    }
+
+    /** 操作栏里找「熟知」按钮：优先 id，其次 contentDescription，最后文案。 */
+    private static View findFamiliarInBar(View bar) {
+        ArrayList<View> views = new ArrayList<>();
+        collectViews(bar, views);
+        for (View view : views) {
+            if (idName(view).contains("well_familiar")) return view;
+        }
+        for (View view : views) {
+            CharSequence desc = view.getContentDescription();
+            if (desc != null && normalize(desc).contains("熟知")) return view;
+        }
+        for (View view : views) {
+            if (view instanceof TextView
+                    && "熟知".equals(normalize(((TextView) view).getText()))) {
+                return view;
+            }
         }
         return null;
+    }
+
+    /** 找不到按钮时把操作栏整棵子树打进日志，用来判断这个版本到底有没有这个控件。 */
+    private static void dumpBar(View bar) {
+        ArrayList<View> views = new ArrayList<>();
+        collectViews(bar, views);
+        StringBuilder builder = new StringBuilder("操作栏子树：");
+        int count = 0;
+        for (View view : views) {
+            if (count++ >= 40) {
+                builder.append(" …");
+                break;
+            }
+            builder.append("\n  ").append(describe(view));
+            if (view instanceof TextView) {
+                String text = normalize(((TextView) view).getText());
+                if (text.length() > 0) builder.append(" \"").append(text).append('"');
+            }
+        }
+        XposedLog.w(builder.toString());
     }
 
     private static String idName(View view) {
@@ -159,13 +269,16 @@ public final class ActionExecutor {
             return false;
         }
 
+        // 没有操作栏这个 id 时，必须确认页面上真有评分按钮才继续用文字判断。
+        // 设置页、列表页里「认识 / 忘记」到处都是，直接看文字会把设置页当成复习页。
+        if (findByIdName(activity, "rev_familiar") == null
+                && findByIdName(activity, "rev_forget") == null) {
+            return false;
+        }
         View root = activity.getWindow().getDecorView();
         boolean know = hasVisibleText(root, "认识");
         boolean forget = hasVisibleText(root, "忘记");
-        if (know || forget) return know && forget;
-        boolean prompt = hasVisibleTextContains(root, "点击屏幕显示答案")
-                || hasVisibleTextContains(root, "请回忆");
-        return !prompt;
+        return know && forget;
     }
 
     private static boolean pronounce(Activity activity) {

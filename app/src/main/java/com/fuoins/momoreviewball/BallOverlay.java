@@ -52,8 +52,8 @@ final class BallOverlay extends Drawable {
     private int seenRevision = -1;
     private int barId;
     private WeakReference<View> barRef;
-    /** 答案出现后尝试把「熟知」按钮露出来的次数，试几次就放弃，避免一直遍历视图树。 */
-    private int familiarAttempts;
+    /** 上次维护「熟知」按钮的时间；答案显示期间每 400ms 复查一次。 */
+    private long lastFamiliarCheck;
 
     private final Runnable clearHighlight = () -> {
         highlight = 0;
@@ -140,19 +140,16 @@ final class BallOverlay extends Drawable {
         }
 
         if (!now) {
-            familiarAttempts = 0;
+            lastFamiliarCheck = 0L;
             return;
         }
-        // 评分栏出现后，把墨墨藏起来的「熟知」按钮露出来。
-        // 按钮可能比评分栏晚一两帧才挂上，失败几次再放弃。
-        if (familiarAttempts < 5) {
-            Activity activity = Util.findActivity(host.getContext());
-            if (activity != null && ActionExecutor.ensureFamiliarVisible(activity)) {
-                familiarAttempts = 5;
-            } else {
-                familiarAttempts++;
-            }
-        }
+        // 答案显示期间持续维护「熟知」按钮：墨墨翻页、刷新时会按自己的
+        // 「标识熟知」设置重新把它藏起来，只翻一次不够。
+        long uptime = android.os.SystemClock.uptimeMillis();
+        if (uptime - lastFamiliarCheck < 400L) return;
+        lastFamiliarCheck = uptime;
+        Activity activity = Util.findActivity(host.getContext());
+        if (activity != null) ActionExecutor.ensureFamiliarVisible(activity);
     }
 
     /**
@@ -294,7 +291,9 @@ final class BallOverlay extends Drawable {
                 // 只在第一次或页面重建后查一次树，之后每次只是一个 isShown()
                 bar = host.getRootView().findViewById(barId);
                 barRef = new WeakReference<>(bar);
-                if (bar == null) return after;
+                // 不在复习页（设置页、单词列表）就没有这条操作栏，
+                // 不能沿用上一页的 after，否则球会一直停在「答案已出现」的配色上
+                if (bar == null) return false;
             }
             return bar.isShown();
         } catch (Throwable t) {
