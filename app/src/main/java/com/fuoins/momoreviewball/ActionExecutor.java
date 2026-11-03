@@ -3,8 +3,7 @@ package com.fuoins.momoreviewball;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
-import android.graphics.PorterDuff;
-import android.graphics.PorterDuffColorFilter;
+import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
@@ -226,11 +225,13 @@ public final class ActionExecutor {
         button.setTag(TAG_BOTTOM_FAMILIAR);
         button.setTextSize(TypedValue.COMPLEX_UNIT_PX, src.getTextSize());
         button.setTypeface(src.getTypeface());
-        button.setGravity(src.getGravity());
+        button.setGravity(Gravity.CENTER);
         button.setIncludeFontPadding(true);
-        button.setPadding(src.getPaddingLeft(), src.getPaddingTop(),
-                src.getPaddingRight(), src.getPaddingBottom());
-        button.setTextColor(color);
+        // 水平 padding 收窄一点：四个按钮分下来宽度有限，沿用「认识」的大 padding
+        // 会把「熟知」两个字挤掉。
+        int padH = Math.round(4f * activity.getResources().getDisplayMetrics().density);
+        button.setPadding(padH, src.getPaddingTop(), padH, src.getPaddingBottom());
+        button.setTextColor(visibleTextColor(color));
         button.setSingleLine(true);
         button.setEllipsize(TextUtils.TruncateAt.END);
         button.setClickable(true);
@@ -246,32 +247,48 @@ public final class ActionExecutor {
         return button;
     }
 
-    /** 克隆「认识」的圆角描边背景并染成熟知色，再补一个按压态。 */
+    /**
+     * 自绘一个描边背景，颜色跟「熟知」色走。
+     *
+     * <p>不能直接克隆「认识」的背景再整体染色：墨墨的按钮背景是实心的，
+     * {@code SRC_IN} 会连填充一起染成绿色，文字也是绿色，直接糊成一片看不见。
+     * 这里只画描边、中间留空，文字和描边同色，深色和浅色主题都能看清。
+     */
     private static void styleButton(TextView button, TextView src, int color,
                                     android.content.res.Resources res) {
         float density = res.getDisplayMetrics().density;
-        int radius = (int) (10f * density + 0.5f);
-        int stroke = Math.max(1, (int) (2f * density + 0.5f));
+        int radius = Math.round(10f * density);
+        int stroke = Math.max(1, Math.round(1.5f * density));
         try {
             Drawable bg = src.getBackground();
-            if (bg != null && bg.getConstantState() != null) {
-                Drawable copy = bg.getConstantState().newDrawable(res).mutate();
-                copy.setColorFilter(new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN));
-                button.setBackground(copy);
-            } else {
-                button.setBackground(roundStroke(radius, stroke, color, 0));
+            if (bg instanceof GradientDrawable) {
+                int r = Math.round(((GradientDrawable) bg).getCornerRadius());
+                if (r > 0) radius = r;
             }
-        } catch (Throwable t) {
-            button.setBackground(roundStroke(radius, stroke, color, 0));
-        }
-        try {
-            StateListDrawable fg = new StateListDrawable();
-            fg.addState(new int[]{android.R.attr.state_pressed},
-                    roundStroke(radius, stroke, color, (color & 0x00FFFFFF) | 0x1A000000));
-            fg.addState(new int[0], new ColorDrawable(0));
-            button.setForeground(fg);
         } catch (Throwable ignored) {
         }
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_pressed},
+                roundStroke(radius, stroke, color, withAlpha(color, 0x40)));
+        states.addState(new int[0], roundStroke(radius, stroke, color, 0));
+        button.setBackground(states);
+        button.setForeground(null);
+    }
+
+    /** 保持色相，只压掉过亮/过暗，避免文字跟背景糊在一起。 */
+    private static int visibleTextColor(int color) {
+        float[] hsv = new float[3];
+        Color.colorToHSV(color, hsv);
+        if (hsv[2] > 0.92f) {
+            hsv[2] = 0.72f;
+        } else if (hsv[2] < 0.16f) {
+            hsv[2] = 0.42f;
+        }
+        return Color.HSVToColor(Color.alpha(color), hsv);
+    }
+
+    private static int withAlpha(int color, int alpha) {
+        return (color & 0x00FFFFFF) | (alpha << 24);
     }
 
     private static GradientDrawable roundStroke(int radius, int stroke, int color, int fill) {
@@ -335,10 +352,29 @@ public final class ActionExecutor {
     }
 
     private static void logButtonLater(View button, ViewGroup bar) {
+        button.post(() -> {
+            // 四个按钮分下来宽度有限，字号放不下就按可用宽度缩一点，别被裁成省略号。
+            if (!(button instanceof TextView)) return;
+            TextView tv = (TextView) button;
+            int avail = tv.getWidth() - tv.getPaddingLeft() - tv.getPaddingRight();
+            float need = tv.getPaint().measureText(String.valueOf(tv.getText()));
+            if (avail > 0 && need > avail && need > 0) {
+                float size = tv.getTextSize() * avail / need * 0.94f;
+                if (size > 1f) {
+                    tv.setTextSize(TypedValue.COMPLEX_UNIT_PX, size);
+                    XposedLog.i("熟知：底栏按钮文字放不下，字号缩到 " + String.format(Locale.US, "%.1f", size));
+                }
+            }
+        });
         button.postDelayed(() -> {
             if (button.isAttachedToWindow()) {
+                TextView tv = button instanceof TextView ? (TextView) button : null;
+                String extra = tv == null ? "" : String.format(Locale.US,
+                        " 文字=%s 字号=%.1f 色=#%08X 文字宽=%.0f",
+                        tv.getText(), tv.getTextSize(), tv.getCurrentTextColor(),
+                        tv.getPaint().measureText(String.valueOf(tv.getText())));
                 XposedLog.i("熟知：底栏按钮 300ms 后 " + describe(button)
-                        + " 操作栏宽=" + bar.getWidth());
+                        + " 操作栏宽=" + bar.getWidth() + extra);
             }
         }, 300L);
     }
