@@ -231,7 +231,7 @@ public final class ActionExecutor {
         // 会把「熟知」两个字挤掉。
         int padH = Math.round(4f * activity.getResources().getDisplayMetrics().density);
         button.setPadding(padH, src.getPaddingTop(), padH, src.getPaddingBottom());
-        button.setTextColor(visibleTextColor(color));
+        button.setTextColor(contrastOn(color));
         button.setSingleLine(true);
         button.setEllipsize(TextUtils.TruncateAt.END);
         button.setClickable(true);
@@ -248,17 +248,16 @@ public final class ActionExecutor {
     }
 
     /**
-     * 自绘一个描边背景，颜色跟「熟知」色走。
+     * 照着官方三个按钮的样式来：实心圆角、白字，只把填充换成「熟知」色。
      *
-     * <p>不能直接克隆「认识」的背景再整体染色：墨墨的按钮背景是实心的，
-     * {@code SRC_IN} 会连填充一起染成绿色，文字也是绿色，直接糊成一片看不见。
-     * 这里只画描边、中间留空，文字和描边同色，深色和浅色主题都能看清。
+     * <p>之前用描边是因为克隆官方背景再整体染色会把文字糊住，但描边跟官方的实心
+     * 按钮并排明显不是一套。这里干脆自己画实心：圆角半径从官方背景里读，
+     * 读不到就用 8dp，和官方保持一致。
      */
     private static void styleButton(TextView button, TextView src, int color,
                                     android.content.res.Resources res) {
         float density = res.getDisplayMetrics().density;
-        int radius = Math.round(10f * density);
-        int stroke = Math.max(1, Math.round(1.5f * density));
+        int radius = Math.round(8f * density);
         try {
             Drawable bg = src.getBackground();
             if (bg instanceof GradientDrawable) {
@@ -269,34 +268,31 @@ public final class ActionExecutor {
         }
         StateListDrawable states = new StateListDrawable();
         states.addState(new int[]{android.R.attr.state_pressed},
-                roundStroke(radius, stroke, color, withAlpha(color, 0x40)));
-        states.addState(new int[0], roundStroke(radius, stroke, color, 0));
+                roundFill(radius, shade(color, 0.88f)));
+        states.addState(new int[0], roundFill(radius, color));
         button.setBackground(states);
         button.setForeground(null);
     }
 
-    /** 保持色相，只压掉过亮/过暗，避免文字跟背景糊在一起。 */
-    private static int visibleTextColor(int color) {
-        float[] hsv = new float[3];
-        Color.colorToHSV(color, hsv);
-        if (hsv[2] > 0.99f) {
-            hsv[2] = 0.78f;
-        } else if (hsv[2] < 0.10f) {
-            hsv[2] = 0.45f;
-        }
-        return Color.HSVToColor(Color.alpha(color), hsv);
+    /** 跟官方按钮一样是实心，文字默认白色；颜色太浅时自动换深色字。 */
+    private static int contrastOn(int color) {
+        double lum = (Color.red(color) * 0.299 + Color.green(color) * 0.587
+                + Color.blue(color) * 0.114) / 255.0;
+        return lum > 0.7 ? 0xDD000000 : 0xFFFFFFFF;
     }
 
-    private static int withAlpha(int color, int alpha) {
-        return (color & 0x00FFFFFF) | (alpha << 24);
+    private static int shade(int color, float factor) {
+        return Color.argb(Color.alpha(color),
+                Math.round(Color.red(color) * factor),
+                Math.round(Color.green(color) * factor),
+                Math.round(Color.blue(color) * factor));
     }
 
-    private static GradientDrawable roundStroke(int radius, int stroke, int color, int fill) {
+    private static GradientDrawable roundFill(int radius, int color) {
         GradientDrawable g = new GradientDrawable();
         g.setShape(GradientDrawable.RECTANGLE);
         g.setCornerRadius(radius);
-        g.setStroke(stroke, color);
-        g.setColor(fill);
+        g.setColor(color);
         return g;
     }
 
