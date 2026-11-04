@@ -25,6 +25,7 @@ final class BallCoverView extends View {
 
     private final View host;
     private final BallOverlay paint;
+    private float lastLoggedAlpha = -1f;
 
     private BallCoverView(Context context, View host, BallOverlay paint) {
         super(context);
@@ -108,8 +109,18 @@ final class BallCoverView extends View {
             setPivotX(host.getPivotX());
             setPivotY(host.getPivotY());
         }
-        if (getAlpha() != host.getAlpha()) {
-            setAlpha(host.getAlpha());
+        // 墨墨把透明度加在球自己那个子 View 上（容器 alpha 一直是 1），
+        // 只跟容器的话覆盖层会把球画成不透明，看起来就是「操作几下透明度没了」。
+        float target = host.getAlpha();
+        View ball = BallOverlay.ballChild(host);
+        if (ball != null) target *= ball.getAlpha();
+        if (Math.abs(getAlpha() - target) > 0.004f) {
+            setAlpha(target);
+        }
+        if (Math.abs(target - lastLoggedAlpha) > 0.05f) {
+            lastLoggedAlpha = target;
+            XposedLog.d("覆盖层透明度 host=" + host.getAlpha()
+                    + " 球=" + (ball == null ? 1f : ball.getAlpha()) + " → " + target);
         }
         if (getVisibility() != host.getVisibility()) {
             setVisibility(host.getVisibility());

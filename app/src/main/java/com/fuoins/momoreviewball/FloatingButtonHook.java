@@ -787,6 +787,10 @@ public final class FloatingButtonHook {
         private boolean answerShownChecked;
         private boolean answerShownCached;
 
+        /** 本次手势的 downTime：MOVE/UP 必须来自同一次按下，防止球外划入被误判。 */
+        private long activeDownTime;
+        /** 按下前球的透明度：墨墨按下会变不透明，被我们拦掉抬手后它自己回不去。 */
+        private float idleBallAlpha = -1f;
         private long downAt;
         private float downX;
         private float downY;
@@ -815,7 +819,16 @@ public final class FloatingButtonHook {
 
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
+                    // 墨墨的球放在一个比球大一倍的容器里，容器边缘是阴影和拖拽热区。
+                    // 在球外的空白处按下不该算成球的手势，这里按真球的圆来判断。
+                    if (!BallOverlay.hitBall(v, event.getX(), event.getY())) {
+                        tracking = false;
+                        return null;
+                    }
                     tracking = true;
+                    activeDownTime = event.getDownTime();
+                    View ballView = BallOverlay.ballChild(v);
+                    idleBallAlpha = ballView == null ? -1f : ballView.getAlpha();
                     swiping = false;
                     dragging = false;
                     answerShownChecked = false;
@@ -837,6 +850,12 @@ public final class FloatingButtonHook {
 
                 case MotionEvent.ACTION_MOVE: {
                     if (!tracking) return null;
+                    // 没有和 DOWN 配对的事件（手指从球外划进来）不是球的手势：
+                    // 球的 View 很大，父容器把 MOVE 重新命中过来时就会发生。
+                    if (event.getDownTime() != activeDownTime) {
+                        reset();
+                        return null;
+                    }
                     lastRawX = event.getRawX();
                     lastRawY = event.getRawY();
                     float dx = lastRawX - downX;
@@ -893,6 +912,10 @@ public final class FloatingButtonHook {
 
                 case MotionEvent.ACTION_UP: {
                     if (!tracking) return null;
+                    if (event.getDownTime() != activeDownTime) {
+                        reset();
+                        return null;
+                    }
                     boolean wasDragging = dragging;
                     boolean wasPreview = peekCalled || peekEverCalled;
                     int previewGesture = peekDir;
@@ -1315,6 +1338,7 @@ public final class FloatingButtonHook {
 
         private void reset() {
             endPreview();
+            restoreBallAlpha();
             tracking = false;
             swiping = false;
             dragging = false;
@@ -1323,6 +1347,25 @@ public final class FloatingButtonHook {
             // 等它结束再按回去，两次是为了兼容动画时长不同的版本
             view.postDelayed(() -> applyScale(view), 320L);
             view.postDelayed(() -> applyScale(view), 900L);
+        }
+
+        /**
+         * 把球的透明度还回按下前的值。
+         *
+         * <p>墨墨按下会把球变实，抬手再淡回去；模块接管手势后原生的抬手收不到，
+         * 它就停在不透明状态。表现就是「操作几下之后球没有透明度了」。
+         */
+        private void restoreBallAlpha() {
+            final float idle = idleBallAlpha;
+            idleBallAlpha = -1f;
+            if (idle < 0f || idle > 0.985f) return;
+            view.postDelayed(() -> {
+                View ball = BallOverlay.ballChild(view);
+                if (ball != null && ball.getAlpha() > idle + 0.03f) {
+                    ball.animate().alpha(idle).setDuration(220L).start();
+                    XposedLog.i("已恢复悬浮球透明度 " + idle);
+                }
+            }, 420L);
         }
 
         /** 临时把「父容器不得抢事件」的权利拿到手，抬手就还回去。 */

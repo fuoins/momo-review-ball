@@ -242,6 +242,65 @@ final class BallOverlay extends Drawable {
     }
 
     /**
+     * 触点是不是落在「真球」上。
+     *
+     * <p>墨墨把球放在一个比球大一倍的容器里，多出来的部分是阴影和拖拽热区。
+     * 容器整块都会收触摸，如果直接按容器算，手指在球外的空白处划一下也会被当成球的手势。
+     * 这里按容器里那颗真球的圆来判断。
+     *
+     * @param x 相对 host 的横坐标（MotionEvent.getX）
+     */
+    static boolean hitBall(View host, float x, float y) {
+        if (!(host instanceof ViewGroup)) return true;
+        ViewGroup group = (ViewGroup) host;
+        View best = null;
+        long bestArea = 0;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE) continue;
+            int w = child.getWidth();
+            int h = child.getHeight();
+            if (w <= 0 || h <= 0) continue;
+            if (Math.abs(w - h) > Math.min(w, h) * 0.15f) continue;
+            long area = (long) w * h;
+            if (area > bestArea) {
+                bestArea = area;
+                best = child;
+            }
+        }
+        // 结构认不出来（还没 inflate 完）时不拦，保持原来的行为
+        if (best == null) return true;
+        float cx = best.getLeft() + best.getWidth() / 2f;
+        float cy = best.getTop() + best.getHeight() / 2f;
+        float radius = Math.min(best.getWidth(), best.getHeight()) / 2f * 1.06f;
+        float dx = x - cx;
+        float dy = y - cy;
+        return dx * dx + dy * dy <= radius * radius;
+    }
+
+    /** host 容器里那颗真正的球；找不到返回 null。 */
+    static View ballChild(View host) {
+        if (!(host instanceof ViewGroup)) return null;
+        ViewGroup group = (ViewGroup) host;
+        View best = null;
+        long bestArea = 0;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE) continue;
+            int w = child.getWidth();
+            int h = child.getHeight();
+            if (w <= 0 || h <= 0) continue;
+            if (Math.abs(w - h) > Math.min(w, h) * 0.15f) continue;
+            long area = (long) w * h;
+            if (area > bestArea) {
+                bestArea = area;
+                best = child;
+            }
+        }
+        return best;
+    }
+
+    /**
      * 在控件内部找真正的那颗球：可见、宽高接近、面积最大的子 View。
      *
      * <p>墨墨把球画在一个比球本身大一倍的容器里（多出来的部分是阴影和拖拽热区），
